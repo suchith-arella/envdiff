@@ -321,6 +321,10 @@ export async function run(cfg, opts = {}) {
     await targets.stop();
   }
 
+  // Pages finish in whatever order the workers get to them; report them in
+  // crawl order so two runs of the same comparison read the same way.
+  const vpOrder = new Map(cfg.viewports.map((v, i) => [v.name, i]));
+  pages.sort((a, b) => a.depth - b.depth || a.key.localeCompare(b.key) || (vpOrder.get(a.viewport) ?? 0) - (vpOrder.get(b.viewport) ?? 0));
   const all = findings.all();
   const counts = countBySeverity(all);
   const failing = all.filter((f) => atLeast(f.severity, cfg.report.failOn));

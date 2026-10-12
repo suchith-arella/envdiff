@@ -145,6 +145,14 @@ test("the HTML report runs without errors", { timeout: 120_000 }, async () => {
     if (await b.count()) await b.click();
   }
   assert.equal(await page.locator(".verdict").textContent(), "FAIL");
+  // Readable on a phone: no view may scroll the page sideways.
+  await page.setViewportSize({ width: 390, height: 844 });
+  for (const hash of ["#findings", "#pages/0", "#interactions", "#run"]) {
+    await page.goto(file + hash);
+    await page.waitForTimeout(300);
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    assert.ok(overflow <= 1, `${hash} overflows by ${overflow}px at phone width`);
+  }
   await browser.close();
   assert.deepEqual(errors, []);
 });
