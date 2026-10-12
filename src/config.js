@@ -160,6 +160,12 @@ export const DEFAULT_CONFIG = {
     scroll: true,
     /** Click "Accept" on common cookie-consent banners (OneTrust, Cookiebot, …). */
     dismissConsent: true,
+    /**
+     * Look twice before reporting: when a page or an interaction differs,
+     * repeat it in both environments and keep only differences that happen
+     * again. The rest are listed as flaky.
+     */
+    confirm: true,
   },
 
   visual: {

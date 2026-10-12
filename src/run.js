@@ -136,11 +136,15 @@ export async function run(cfg, opts = {}) {
         const added = [...ids].map((id) => findings.get(id)).filter(Boolean);
         const crit = added.filter((f) => f?.severity === "critical").length;
         const major = added.filter((f) => f?.severity === "major").length;
-        const ixCount = pages.filter((p) => p.key === item.key).reduce((s, p) => s + p.interactions.length, 0);
+        const mine = pages.filter((p) => p.key === item.key);
+        const ixCount = mine.reduce((s, p) => s + p.interactions.length, 0);
+        const flakyCount = mine.reduce((s, p) => s + p.flaky.length + p.interactions.filter((/** @type {any} */ i) => i.flaky).length, 0);
         log.info(
           `${color.dim(`[${done}/${Math.min(crawler?.size ?? 0, cfg.crawl.maxPages)}]`)} ${item.key}  ${
             crit ? color.red(`${crit} critical `) : ""
-          }${major ? color.yellow(`${major} major `) : ""}${!crit && !major ? color.green("ok ") : ""}${color.dim(`· ${ixCount} interactions · ${formatDuration(Date.now() - t0)}`)}`,
+          }${major ? color.yellow(`${major} major `) : ""}${!crit && !major ? color.green("ok ") : ""}${color.dim(
+            `· ${ixCount} interactions${flakyCount ? ` · ${flakyCount} flaky (not reported)` : ""} · ${formatDuration(Date.now() - t0)}`,
+          )}`,
         );
       },
     });
@@ -167,49 +171,49 @@ export async function run(cfg, opts = {}) {
         const s = sessions[vp.name];
         const isPrimary = i === 0;
         const slug = `${slugify(key, 40)}-${shortHash(key, 6)}-${vp.name}`;
-        const [b, c] = await Promise.all(
-          /** @type {const} */ (["baseline", "candidate"]).map((side) =>
-            capturePage(s[side], key, {
-              outDir,
-              file: assetPath(`${slug}-${side}.png`),
-              a11y: isPrimary && cfg.a11y.enabled,
-              perf: isPrimary && cfg.perf.enabled,
-            }),
-          ),
-        );
-        for (const [snap, scope] of /** @type {const} */ ([
-          [b, scopeB],
-          [c, scopeC],
-        ])) {
-          if (snap.dom) annotateElements(/** @type {any} */ (snap.dom.actionables), (href) => scope.keyOf(href, { ignoreQuery: cfg.crawl.ignoreQuery }));
-        }
-
-        /** @type {Set<string>} */
-        const ids = new Set();
-        const add = (/** @type {any} */ f) => {
-          // A secondary viewport repeating exactly what the primary one found
-          // (a 404, a console error) adds nothing; keep only what differs by viewport.
-          const same = `${f.type}|${f.title}`;
-          if (isPrimary) primaryTitles.add(same);
-          else if (primaryTitles.has(same)) return null;
-          const r = findings.add(f);
-          if (r) {
-            ids.add(r.id);
-            pageIds.add(r.id);
+        const captureBoth = async () => {
+          const snaps = await Promise.all(
+            /** @type {const} */ (["baseline", "candidate"]).map((side) =>
+              capturePage(s[side], key, {
+                outDir,
+                file: assetPath(`${slug}-${side}.png`),
+                a11y: isPrimary && cfg.a11y.enabled,
+                perf: isPrimary && cfg.perf.enabled,
+              }),
+            ),
+          );
+          for (const [snap, scope] of /** @type {const} */ ([
+            [snaps[0], scopeB],
+            [snaps[1], scopeC],
+          ])) {
+            if (snap.dom) annotateElements(/** @type {any} */ (snap.dom.actionables), (href) => scope.keyOf(href, { ignoreQuery: cfg.crawl.ignoreQuery }));
           }
-          return r;
+          return snaps;
         };
-        const extra = isPrimary
-          ? comparePages(b, c, { add, cfg, scopes, tokens, primary: true, seen: seenChanges })
-          : comparePages(b, c, { add, cfg: secondaryCfg(cfg), scopes, tokens, primary: false, seen: seenChanges });
-        const loaded = (/** @type {import("./capture.js").Snapshot} */ s) => !s.error && (s.status == null || s.status < 400);
-
-        /** @type {any} */
-        let visual = null;
-        if (b.screenshot && c.screenshot) {
+        /**
+         * Everything that differs between two snapshots, held back rather
+         * than reported so a second look can confirm it.
+         * @param {import("./capture.js").Snapshot} b
+         * @param {import("./capture.js").Snapshot} c
+         */
+        const judge = (b, c) => {
+          /** @type {any[]} */
+          const found = [];
+          const hold = (/** @type {any} */ f) => (found.push(f), f);
+          const seen = new Set(seenChanges);
+          const extra = comparePages(b, c, { add: hold, cfg: isPrimary ? cfg : secondaryCfg(cfg), scopes, tokens, primary: isPrimary, seen });
+          return { found, seen, extra, visual: compareScreens(b, c, hold) };
+        };
+        /**
+         * @param {import("./capture.js").Snapshot} b
+         * @param {import("./capture.js").Snapshot} c
+         * @param {(f: any) => any} add
+         */
+        const compareScreens = (b, c, add) => {
+          if (!b.screenshot || !c.screenshot) return null;
           const diffRel = assetPath(`${slug}-diff.png`);
           const d = diffImages(path.join(outDir, b.screenshot), path.join(outDir, c.screenshot), path.join(outDir, diffRel), { threshold: cfg.visual.threshold });
-          visual = {
+          const visual = {
             ratio: Math.round(d.ratio * 10000) / 10000,
             size: { baseline: d.sizeA, candidate: d.sizeB },
             regions: d.regions.map((r) => ({ ...r, label: describeRegion(r, c.dom) })),
@@ -230,7 +234,46 @@ export async function run(cfg, opts = {}) {
               fp: "visual",
             });
           }
+          return visual;
+        };
+        const loaded = (/** @type {import("./capture.js").Snapshot} */ s) => !s.error && (s.status == null || s.status < 400);
+
+        let [b, c] = await captureBoth();
+        let judged = judge(b, c);
+        /** @type {string[]} */
+        let flaky = [];
+        if (cfg.stabilize.confirm && judged.found.length && !stopped()) {
+          // Timing makes one-off differences: an environment still booting, a
+          // slow response, an animation caught mid-way. Look again and keep
+          // only what shows up both times.
+          const first = judged.found;
+          [b, c] = await captureBoth();
+          judged = judge(b, c);
+          const identity = (/** @type {any} */ f) => `${f.type}|${f.fp ?? ""}`;
+          const firstIds = new Set(first.map(identity));
+          const againIds = new Set(judged.found.map(identity));
+          flaky = first.filter((f) => !againIds.has(identity(f))).map((f) => truncate(f.title, 200));
+          judged.found = judged.found.filter((f) => firstIds.has(identity(f)));
         }
+        for (const sig of judged.seen) seenChanges.add(sig);
+
+        /** @type {Set<string>} */
+        const ids = new Set();
+        const add = (/** @type {any} */ f) => {
+          // A secondary viewport repeating exactly what the primary one found
+          // (a 404, a console error) adds nothing; keep only what differs by viewport.
+          const same = `${f.type}|${f.title}`;
+          if (isPrimary) primaryTitles.add(same);
+          else if (primaryTitles.has(same)) return null;
+          const r = findings.add(f);
+          if (r) {
+            ids.add(r.id);
+            pageIds.add(r.id);
+          }
+          return r;
+        };
+        for (const f of judged.found) add(f);
+        const { extra, visual } = judged;
 
         if (isPrimary) {
           api.record("baseline", b.log.api, key);
@@ -289,6 +332,7 @@ export async function run(cfg, opts = {}) {
           interactions,
           skipped: skipped.slice(0, 100),
           findings: [...ids],
+          flaky,
         });
       }
       return { discovered, ids: pageIds };
@@ -356,6 +400,8 @@ export async function run(cfg, opts = {}) {
       pages: new Set(pages.map((p) => p.key)).size,
       interactions: pages.reduce((s, p) => s + p.interactions.length, 0),
       interactionsDifferent: pages.reduce((s, p) => s + p.interactions.filter((/** @type {any} */ i) => i.verdict === "different").length, 0),
+      /** Differences seen once that didn't happen again when repeated: timing, not reported. */
+      flaky: pages.reduce((s, p) => s + p.flaky.length + p.interactions.filter((/** @type {any} */ i) => i.flaky).length, 0),
       journeys: journeys.length,
       suppressed: findings.suppressed,
       notCrawled: crawler ? crawler.overflow.size : 0,
@@ -403,6 +449,7 @@ function snapSummary(s) {
     error: s.error,
     loadMs: s.loadMs,
     redirects: s.redirects,
+    unstable: s.unstable ?? false,
     title: s.dom?.title ?? null,
     screenshot: s.screenshot,
     counts: s.dom

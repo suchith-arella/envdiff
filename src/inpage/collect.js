@@ -7,7 +7,8 @@
 
 /**
  * Installed with addInitScript before any page script runs. Tracks when the
- * DOM last changed so we can tell when a page has stopped rendering.
+ * DOM last changed and when the page last scrolled, so we can tell when a
+ * page has stopped rendering.
  * @param {{ ignoreMutations: string[] }} opts
  */
 export function initScript(opts) {
@@ -17,6 +18,36 @@ export function initScript(opts) {
   /** @type {any} */
   const state = (w.__envdiff = w.__envdiff || {});
   state.lastMutation = performance.now();
+  state.lastScroll = -1e9;
+  state.lastBusy = -1e9;
+  // Long tasks: the page is still computing (an app booting after its
+  // network calls finished) even though nothing visible is happening yet.
+  try {
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) state.lastBusy = Math.max(state.lastBusy, e.startTime + e.duration);
+    }).observe({ type: "longtask", buffered: true });
+  } catch {
+    // not supported (Firefox, WebKit)
+  }
+  // Vertical scrolling of the window or of a pane that fills much of it (apps
+  // that scroll a main container). Smooth scrolls to a section take a while,
+  // and sticky headers, scrollspy and reveal animations follow along.
+  // Sideways carousels don't count.
+  /** @type {WeakMap<object, number>} */
+  const tops = new WeakMap();
+  addEventListener(
+    "scroll",
+    (e) => {
+      const t = /** @type {any} */ (e.target);
+      const isDoc = t === document || t === document.documentElement || t === document.body;
+      if (!isDoc && !(t && t.clientHeight >= innerHeight * 0.5)) return;
+      const top = isDoc ? scrollY : t.scrollTop;
+      if (tops.get(t) === top) return;
+      tops.set(t, top);
+      state.lastScroll = performance.now();
+    },
+    { capture: true, passive: true },
+  );
   const ignore = (opts && opts.ignoreMutations) || [];
   const ignored = (/** @type {Node} */ node) => {
     const el = node.nodeType === 1 ? /** @type {Element} */ (node) : node.parentElement;
@@ -39,10 +70,57 @@ export function initScript(opts) {
   mo.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
 }
 
-/** Milliseconds since the DOM last changed. */
-export function msSinceMutation() {
+/** Milliseconds since the DOM last changed, the page last scrolled or its main thread was last busy. */
+export function msSinceChange() {
   const s = /** @type {any} */ (window).__envdiff;
-  return s && s.lastMutation ? performance.now() - s.lastMutation : 1e9;
+  if (!s) return 1e9;
+  const now = performance.now();
+  return Math.min(now - (s.lastMutation ?? -1e9), now - (s.lastScroll ?? -1e9), now - (s.lastBusy ?? -1e9));
+}
+
+/**
+ * What the page shows, cheaply: scroll position, height, address and a hash
+ * of the text with digits blanked (clocks and counters tick). Equal before and
+ * after a capture means the page held still while we captured it.
+ */
+export function pageFingerprint() {
+  const de = document.documentElement;
+  const body = document.body;
+  const text = (body ? body.innerText : "").replace(/\d+/g, "#");
+  let h = 0;
+  for (let i = 0; i < text.length; i++) h = (Math.imul(h, 31) + text.charCodeAt(i)) | 0;
+  const height = Math.max(de.scrollHeight, body ? body.scrollHeight : 0);
+  return `${Math.round(scrollX)},${Math.round(scrollY)}|${height}|${location.href}|${text.length}:${h}`;
+}
+
+/** Load timing as the browser recorded it. */
+export function readPerf() {
+  const nav = /** @type {PerformanceNavigationTiming | undefined} */ (performance.getEntriesByType("navigation")[0]);
+  const fcp = performance.getEntriesByName("first-contentful-paint")[0];
+  const buffered = (/** @type {string} */ type) => {
+    try {
+      const po = new PerformanceObserver(() => {});
+      po.observe({ type, buffered: true });
+      const entries = po.takeRecords();
+      po.disconnect();
+      return entries;
+    } catch {
+      return [];
+    }
+  };
+  const lcpEntries = buffered("largest-contentful-paint");
+  const shifts = buffered("layout-shift");
+  const resources = /** @type {PerformanceResourceTiming[]} */ (performance.getEntriesByType("resource"));
+  return {
+    ttfb: nav ? Math.round(nav.responseStart - nav.startTime) : null,
+    domContentLoaded: nav ? Math.round(nav.domContentLoadedEventEnd - nav.startTime) : null,
+    load: nav && nav.loadEventEnd > 0 ? Math.round(nav.loadEventEnd - nav.startTime) : null,
+    fcp: fcp ? Math.round(fcp.startTime) : null,
+    lcp: lcpEntries.length ? Math.round(lcpEntries[lcpEntries.length - 1].startTime) : null,
+    cls: Math.round(shifts.reduce((sum, e) => sum + (/** @type {any} */ (e).hadRecentInput ? 0 : /** @type {any} */ (e).value), 0) * 1000) / 1000,
+    requests: resources.length + 1,
+    transferKB: Math.round((resources.reduce((s, r) => s + (r.transferSize || 0), 0) + (nav ? nav.transferSize || 0 : 0)) / 1024),
+  };
 }
 
 /**
@@ -57,7 +135,6 @@ export function msSinceMutation() {
  *   allowSelectors?: string[],
  *   maxActionables?: number,
  *   maxTextLines?: number,
- *   perf?: boolean,
  * }} opts
  */
 export async function collectPage(opts) {
@@ -503,37 +580,6 @@ export async function collectPage(opts) {
     })
     .join("|");
 
-  /** @type {any} */
-  let perf = null;
-  if (opts.perf) {
-    const nav = /** @type {PerformanceNavigationTiming | undefined} */ (performance.getEntriesByType("navigation")[0]);
-    const fcp = performance.getEntriesByName("first-contentful-paint")[0];
-    const buffered = (/** @type {string} */ type) => {
-      try {
-        const po = new PerformanceObserver(() => {});
-        po.observe({ type, buffered: true });
-        const entries = po.takeRecords();
-        po.disconnect();
-        return entries;
-      } catch {
-        return [];
-      }
-    };
-    const lcpEntries = buffered("largest-contentful-paint");
-    const shifts = buffered("layout-shift");
-    const resources = /** @type {PerformanceResourceTiming[]} */ (performance.getEntriesByType("resource"));
-    perf = {
-      ttfb: nav ? Math.round(nav.responseStart - nav.startTime) : null,
-      domContentLoaded: nav ? Math.round(nav.domContentLoadedEventEnd - nav.startTime) : null,
-      load: nav && nav.loadEventEnd > 0 ? Math.round(nav.loadEventEnd - nav.startTime) : null,
-      fcp: fcp ? Math.round(fcp.startTime) : null,
-      lcp: lcpEntries.length ? Math.round(lcpEntries[lcpEntries.length - 1].startTime) : null,
-      cls: Math.round(shifts.reduce((sum, e) => sum + (/** @type {any} */ (e).hadRecentInput ? 0 : /** @type {any} */ (e).value), 0) * 1000) / 1000,
-      requests: resources.length + 1,
-      transferKB: Math.round((resources.reduce((s, r) => s + (r.transferSize || 0), 0) + (nav ? nav.transferSize || 0 : 0)) / 1024),
-    };
-  }
-
   return {
     url: location.href,
     title: document.title,
@@ -560,7 +606,8 @@ export async function collectPage(opts) {
     text,
     dialogs,
     styleSig,
-    perf,
+    // Filled in by the caller, from before we scrolled.
+    perf: /** @type {ReturnType<typeof readPerf> | null} */ (null),
   };
 }
 

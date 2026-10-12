@@ -319,6 +319,11 @@
       html += '<div class="card"><h3>Text changes <span class="muted small" style="text-transform:none;letter-spacing:0">−' + p.text.removed + " +" + p.text.added + "</span></h3>" + textDiff(p.text.lines) + "</div>";
     }
     if (b.a11y || c.a11y) html += a11yCard(b.a11y || [], c.a11y || []);
+    if (p.flaky && p.flaky.length) {
+      html += '<div class="card"><h3>Didn’t reproduce <span class="count">' + p.flaky.length + '</span></h3>' +
+        '<p class="muted small">Seen on the first capture but not on a second one, so not reported. Usually timing: a page still loading or animating.</p>' +
+        "<table><tbody>" + p.flaky.map(function (t) { return '<tr><td class="small">' + esc(t) + "</td></tr>"; }).join("") + "</tbody></table></div>";
+    }
     if (p.skipped && p.skipped.length) {
       html += '<div class="card"><h3>Not clicked <span class="count">' + p.skipped.length + '</span></h3><table><tbody>' + p.skipped.map(function (s) {
         return '<tr><td class="el">' + esc(s.element) + '</td><td class="muted small">' + esc(s.reason) + "</td></tr>";
@@ -373,6 +378,7 @@
           '<td class="el">' + (ix.action === "select" ? "choose <b>" + esc(ix.option) + "</b> in " : "") + esc(ix.path.join(" → ")) + "</td>" +
           '<td class="outcome">' + esc(ix.baseline) + '</td><td class="outcome">' + esc(ix.candidate) + "</td>" +
           '<td><span class="verdict-pill ' + ix.verdict + '">' + ix.verdict + "</span>" +
+          (ix.flaky ? ' <span class="verdict-pill flaky" title="Differed once, but not when repeated from a fresh load">flaky</span>' : "") +
           (ix.findings && ix.findings.length ? "<div class=small>" + badges(sevCounts(ix.findings)) + "</div>" : "") + "</td><td>" + shots + "</td></tr>";
       }).join("") + "</tbody></table>";
   }
@@ -442,7 +448,7 @@
       ["envdiff", DATA.tool.version], ["Started", new Date(m.startedAt).toLocaleString()], ["Duration", fmtDuration(m.durationMs)],
       ["Browser", m.browser], ["Viewports", m.viewports.join(", ")], ["Max pages", m.settings.maxPages], ["Max depth", m.settings.maxDepth],
       ["Exploration", m.settings.explore], ["Mutations", m.settings.mutations], ["Fails on", m.settings.failOn],
-      ["Suppressed findings", s.suppressed], ["Skipped (same route)", DATA.crawl ? DATA.crawl.skippedByPattern : 0],
+      ["Suppressed findings", s.suppressed], ["Didn’t reproduce (not reported)", s.flaky || 0], ["Skipped (same route)", DATA.crawl ? DATA.crawl.skippedByPattern : 0],
     ];
     var html = tabs("run") + '<div class="card"><h3>Settings</h3><div class="pad"><dl class="kv">' + kv.map(function (x) { return "<dt>" + esc(x[0]) + "</dt><dd>" + esc(x[1]) + "</dd>"; }).join("") + "</dl></div></div>";
     if (DATA.errors.length) {

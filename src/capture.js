@@ -1,11 +1,12 @@
 import path from "node:path";
-import { collectPage, msSinceMutation, scrollThrough } from "./inpage/collect.js";
+import { collectPage, msSinceChange, pageFingerprint, readPerf, scrollThrough } from "./inpage/collect.js";
 import { instrumentPage } from "./instrument.js";
 import { sleep } from "./util/misc.js";
 
 /**
- * Wait until the page stops changing: no recent network activity and no DOM
- * mutations for `quietMs`. Bounded by `timeout`; returns whether it settled.
+ * Wait until the page stops changing: no network activity, DOM mutations,
+ * scrolling, client-side navigation or long main-thread tasks for `quietMs`.
+ * Bounded by `timeout`; returns whether it settled.
  * @param {import("playwright").Page} page
  * @param {import("./instrument.js").Instrumented} inst
  * @param {{ timeout?: number, quietMs?: number }} [opts]
@@ -16,18 +17,53 @@ export async function settle(page, inst, opts = {}) {
   const deadline = Date.now() + timeout;
   await page.waitForLoadState("load", { timeout: Math.max(1, timeout) }).catch(() => {});
   while (Date.now() < deadline) {
-    let domQuietFor = 0;
+    let quietFor = 0;
     try {
-      domQuietFor = await page.evaluate(msSinceMutation);
+      quietFor = await page.evaluate(msSinceChange);
     } catch {
       // Mid-navigation: the old document is gone and the new one isn't ready.
       await sleep(100);
       continue;
     }
-    if (domQuietFor >= quietMs && inst.networkQuiet(quietMs)) return true;
+    if (quietFor >= quietMs && inst.networkQuiet(quietMs) && inst.navigationQuiet(quietMs)) return true;
     await sleep(100);
   }
   return false;
+}
+
+/**
+ * Scroll through the page so lazy and scroll-revealed content renders. Apps
+ * that finish booting seconds after load run their router again and re-render,
+ * which hides that content again; go round once more when that happens.
+ * @param {import("playwright").Page} page
+ * @param {import("./instrument.js").Instrumented} inst
+ */
+export async function revealAll(page, inst) {
+  for (let pass = 0; pass < 3; pass++) {
+    const navigations = inst.log.navigations.length;
+    await page.evaluate(scrollThrough, { maxSteps: 25, delayMs: 100 }).catch(() => {});
+    await settle(page, inst, { timeout: 4000, quietMs: 300 });
+    if (inst.log.navigations.length === navigations) return;
+  }
+}
+
+/**
+ * Back to the top, with scroll-driven effects (sticky headers, scrollspy,
+ * reveal animations) caught up. Fixed elements are drawn where the viewport
+ * is, so a page left scrolled to a section would show its header halfway down
+ * a full-page screenshot.
+ * @param {import("playwright").Page} page
+ * @param {import("./instrument.js").Instrumented} inst
+ */
+export async function scrollToTop(page, inst) {
+  const moved = await page
+    .evaluate(() => {
+      if (scrollX === 0 && scrollY === 0) return false;
+      window.scrollTo({ top: 0, left: 0, behavior: "instant" });
+      return true;
+    })
+    .catch(() => false);
+  if (moved) await settle(page, inst, { timeout: 2500, quietMs: 250 });
 }
 
 /**
@@ -36,8 +72,9 @@ export async function settle(page, inst, opts = {}) {
  * @param {import("./instrument.js").Instrumented} inst
  * @param {string} url
  * @param {import("./config.js").Config} cfg
+ * @param {{ perf?: boolean }} [opts]
  */
-export async function loadPage(page, inst, url, cfg) {
+export async function loadPage(page, inst, url, cfg, opts = {}) {
   const started = Date.now();
   /** @type {import("playwright").Response | null} */
   let mainResponse = null;
@@ -47,6 +84,9 @@ export async function loadPage(page, inst, url, cfg) {
   page.on("response", onResponse);
   /** @type {string | null} */
   let error = null;
+  /** @type {ReturnType<typeof readPerf> | null} */
+  let perf = null;
+  let revealedAt = 0;
   try {
     const res = await page.goto(url, { waitUntil: "load", timeout: cfg.timeouts.navigation });
     if (res) mainResponse = res;
@@ -60,14 +100,15 @@ export async function loadPage(page, inst, url, cfg) {
   }
   if (!error) {
     await settle(page, inst, { timeout: cfg.stabilize.maxWaitMs, quietMs: cfg.stabilize.quietMs });
+    // Before we touch anything: our scrolling reveals content that would
+    // otherwise count as the page's largest paint, and clicks end LCP.
+    if (opts.perf) perf = await page.evaluate(readPerf).catch(() => null);
     if (cfg.stabilize.dismissConsent && (await dismissConsent(page))) await settle(page, inst, { timeout: 2000, quietMs: 300 });
     await page
       .evaluate(() => Promise.race([document.fonts ? document.fonts.ready : null, new Promise((r) => setTimeout(r, 3000))]))
       .catch(() => {});
-    if (cfg.stabilize.scroll) {
-      await page.evaluate(scrollThrough, { maxSteps: 25, delayMs: 100 }).catch(() => {});
-      await settle(page, inst, { timeout: 4000, quietMs: 300 });
-    }
+    if (cfg.stabilize.scroll) await revealAll(page, inst);
+    revealedAt = inst.log.navigations.length;
     await waitForImages(page, 4000);
   }
   /** @type {import("playwright").Response | null} */
@@ -83,6 +124,9 @@ export async function loadPage(page, inst, url, cfg) {
   }
   return {
     error,
+    perf,
+    /** Client-side navigations seen by the time the page was scrolled through. */
+    revealedAt,
     status: res ? /** @type {import("playwright").Response} */ (res).status() : null,
     headers: res ? await /** @type {import("playwright").Response} */ (res).allHeaders().catch(() => ({})) : {},
     redirects,
@@ -218,6 +262,7 @@ export async function runAxe(page, cfg) {
  * @property {string|null} screenshot Path relative to the report directory.
  * @property {Awaited<ReturnType<typeof runAxe>> | null} a11y
  * @property {import("./instrument.js").PageLog} log
+ * @property {boolean} [unstable] The page kept changing while we captured it.
  */
 
 /**
@@ -251,7 +296,7 @@ export async function capturePage(env, key, opts) {
     log: inst.log,
   };
   try {
-    const load = await loadPage(page, inst, url, cfg);
+    const load = await loadPage(page, inst, url, cfg, { perf: opts.perf });
     Object.assign(snap, {
       status: load.status,
       redirects: load.redirects,
@@ -262,18 +307,23 @@ export async function capturePage(env, key, opts) {
       finalKey: env.scope.keyOf(page.url(), { ignoreQuery: cfg.crawl.ignoreQuery }),
     });
     if (!load.error) {
-      snap.dom = await page.evaluate(collectPage, {
-        maskSelectors: cfg.visual.mask,
-        ignoreSelectors: cfg.ignore.selectors,
-        skipSelectors: cfg.explore.skip.selectors,
-        allowSelectors: cfg.explore.allow.selectors,
-        perf: opts.perf,
-      });
-      if (cfg.visual.enabled) {
-        await screenshot(page, path.join(opts.outDir, opts.file), cfg, { scrollHeight: snap.dom.doc.scrollHeight });
-        snap.screenshot = opts.file;
-      }
+      snap.unstable = !(await captureStill(page, inst, cfg, async () => {
+        snap.dom = await page.evaluate(collectPage, {
+          maskSelectors: cfg.visual.mask,
+          ignoreSelectors: cfg.ignore.selectors,
+          skipSelectors: cfg.explore.skip.selectors,
+          allowSelectors: cfg.explore.allow.selectors,
+        });
+        if (cfg.visual.enabled) {
+          await screenshot(page, path.join(opts.outDir, opts.file), cfg, { scrollHeight: snap.dom.doc.scrollHeight });
+          snap.screenshot = opts.file;
+        }
+      }, load.revealedAt));
+      if (snap.dom) snap.dom.perf = load.perf;
       if (opts.a11y) snap.a11y = await runAxe(page, cfg).catch(() => null);
+      // Late client-side redirects (a login wall after the app boots) land here.
+      snap.finalUrl = page.url();
+      snap.finalKey = env.scope.keyOf(page.url(), { ignoreQuery: cfg.crawl.ignoreQuery });
     }
   } catch (e) {
     snap.error = snap.error ?? `Capture failed: ${/** @type {Error} */ (e).message.split("\n")[0]}`;
@@ -282,6 +332,37 @@ export async function capturePage(env, key, opts) {
     await page.close().catch(() => {});
   }
   return snap;
+}
+
+/**
+ * Run `capture` from the top of the page and check the page held still while
+ * it ran: same scroll position, size, address and text before and after, and
+ * no client-side navigation. Apps that finish booting late re-render and
+ * scroll to a section seconds after "load"; capture again once that's over.
+ * @param {import("playwright").Page} page
+ * @param {import("./instrument.js").Instrumented} inst
+ * @param {import("./config.js").Config} cfg
+ * @param {() => Promise<void>} capture
+ * @param {number} revealed Client-side navigations seen when the page was last scrolled through.
+ * @returns {Promise<boolean>} False if the page never held still.
+ */
+async function captureStill(page, inst, cfg, capture, revealed) {
+  for (let attempt = 0; ; attempt++) {
+    if (inst.log.navigations.length !== revealed) {
+      // The router ran again since we scrolled through: what we revealed may
+      // be hidden again.
+      await settle(page, inst, { timeout: cfg.stabilize.maxWaitMs, quietMs: cfg.stabilize.quietMs });
+      if (cfg.stabilize.scroll) await revealAll(page, inst);
+      revealed = inst.log.navigations.length;
+    }
+    await scrollToTop(page, inst);
+    const before = await page.evaluate(pageFingerprint).catch(() => null);
+    await capture();
+    const after = await page.evaluate(pageFingerprint).catch(() => null);
+    if (before !== null && before === after && inst.log.navigations.length === revealed) return true;
+    if (attempt >= 2) return false;
+    await settle(page, inst, { timeout: cfg.stabilize.maxWaitMs, quietMs: cfg.stabilize.quietMs });
+  }
 }
 
 const KEPT_HEADERS = [

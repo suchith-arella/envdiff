@@ -146,15 +146,18 @@ report only what differs from the primary.
 
 ## `stabilize`
 
-When a page counts as "ready": no network activity and no DOM changes for `quietMs`.
+When a page counts as "ready": for `quietMs` there has been no network activity, no DOM change, no scrolling, no client-side navigation (`pushState`, `replaceState`, hash changes) and no long task on the main thread. The last two catch single-page apps that finish booting seconds after `load`, run their router again and re-render.
+
+Pages are captured from the top. envdiff checks that a page held still while it was captured (same scroll position, size, address and text before and after) and captures again if it didn't. If the app's router ran again after envdiff scrolled through the page, envdiff scrolls through it again, because a re-render can hide sections that only appear once scrolled into view.
 
 | Key | Default | |
 |---|---|---|
 | `quietMs` | `400` | |
 | `maxWaitMs` | `10000` | Give up waiting after this long and use the page as it is. |
 | `ignoreMutations` | `[]` | Selectors whose changes don't count (carousels, tickers, clocks). |
-| `scroll` | `true` | Scroll through each page so lazy content loads before the full-page screenshot. |
+| `scroll` | `true` | Scroll through each page so lazy and scroll-revealed content loads before the full-page screenshot. |
 | `dismissConsent` | `true` | Click "Accept" on common cookie banners (OneTrust, Cookiebot, Didomi, Usercentrics…). |
+| `confirm` | `true` | Before reporting a difference on a page or an interaction, repeat it in both environments and keep only what happens both times. Differences that don't reproduce are listed in the report as "didn't reproduce" and aren't counted. Set to `false` for faster, noisier runs. |
 
 ## `visual`
 
@@ -186,7 +189,7 @@ When a page counts as "ready": no network activity and no DOM changes for `quiet
 |---|---|
 | `text` | Regexes removed from text before comparing. |
 | `console` | Console messages and exceptions to ignore. |
-| `requests` | Request URL regexes to ignore (failures and API shapes). Common analytics, ads and session-replay hosts are ignored already. |
+| `requests` | Request URL regexes to ignore (failures and API shapes). Common analytics, ads and session-replay hosts are ignored already, as are same-origin calls whose path starts with a machine-generated segment (`/k_yd21tBWxanHnm6fo7hD1ca/...`): bot-protection scripts post there, and the path differs per environment. |
 | `selectors` | Elements ignored for controls, text, forms and accessibility. |
 | `findings` | Finding ids (shown in the report) or type globs (`perf.*`, `a11y.color-contrast`) to drop. |
 

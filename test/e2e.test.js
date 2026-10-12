@@ -20,7 +20,15 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "envdiff-e2e-"));
 const log = createLogger({ level: process.env.ENVDIFF_TEST_VERBOSE ? "info" : "silent" });
 
 before(async () => {
-  for (const variant of /** @type {const} */ (["baseline", "baseline", "candidate"])) sites.push(await startSite({ variant }));
+  // Deployments differ in speed: the second baseline finishes booting /story
+  // much later, the way a UAT box lags production.
+  for (const [variant, bootChunks] of /** @type {const} */ ([
+    ["baseline", 1],
+    ["baseline", 9],
+    ["candidate", 5],
+  ])) {
+    sites.push(await startSite({ variant, bootChunks }));
+  }
   [baseline, baseline2, candidate] = sites.map((s) => s.url);
 });
 after(async () => {
@@ -32,7 +40,7 @@ after(async () => {
 const config = (b, c, out) => ({
   baseline: { url: b, label: "Baseline" },
   candidate: { url: c, label: "Candidate" },
-  crawl: { maxPages: 14 },
+  crawl: { maxPages: 15 },
   explore: { maxActionsPerPage: 15, depth: 2 },
   viewports: ["desktop", "mobile"],
   // The fixture has a live clock and a random visitor counter: the kind of
@@ -87,10 +95,14 @@ test("finds every planted regression", { timeout: 300_000 }, async () => {
   const missing = expected.filter((e) => !found.has(e));
   assert.deepEqual(missing, [], `not found:\n${missing.join("\n")}\n\nfound:\n${[...found].sort().join("\n")}`);
 
-  // Slow is not broken: the candidate's /api/tips answers after 3s, and the
-  // home page polls /api/notifications in the background on both sides.
-  const falseAlarms = report.findings.filter((/** @type {any} */ f) => /Show tips|notifications/i.test(`${f.title} ${f.detail ?? ""}`));
-  assert.deepEqual(falseAlarms.map((/** @type {any} */ f) => f.title), []);
+  // Slow is not broken: the candidate's /api/tips answers after 3s, the home
+  // page polls /api/notifications in the background on both sides, /story
+  // finishes booting at a different time on each, and the bot-protection
+  // beacon posts to a different path on each.
+  const falseAlarms = report.findings.filter(
+    (/** @type {any} */ f) => /Show tips|notifications|:opaque/i.test(`${f.title} ${f.detail ?? ""}`) || f.page === "/story",
+  );
+  assert.deepEqual(falseAlarms.map((/** @type {any} */ f) => `${f.page} ${f.type}: ${f.title}`), []);
 
   assert.equal(exitCode, 1);
   assert.equal(report.summary.verdict, "fail");
@@ -122,6 +134,15 @@ test("identical deployments produce a clean report", { timeout: 300_000 }, async
   assert.ok(report.summary.interactions >= 10, `explored ${report.summary.interactions} interactions`);
   assert.equal(report.pages.flatMap((/** @type {any} */ p) => p.interactions).filter((/** @type {any} */ i) => i.verdict === "different").length, 0);
   assert.equal(report.journeys[0].verdict, "same");
+  // The late-booting page was explored, including the button that only fades
+  // in once scrolled to, and captured from the top on both sides.
+  const story = report.pages.find((/** @type {any} */ p) => p.key === "/story" && p.viewport === "desktop");
+  assert.ok(story, "crawled /story");
+  const clicked = story.interactions.map((/** @type {any} */ i) => i.path.join(" > "));
+  assert.ok(clicked.some((/** @type {string} */ l) => /Show milestones/.test(l)), clicked.join("\n"));
+  assert.ok(clicked.some((/** @type {string} */ l) => /Download brochure/.test(l)), clicked.join("\n"));
+  // Only the footer clock's mask width may differ (proportional digits).
+  assert.ok((story.visual?.ratio ?? 0) < 0.002, `story differs by ${story.visual?.ratio}`);
 });
 
 test("the HTML report runs without errors", { timeout: 120_000 }, async () => {

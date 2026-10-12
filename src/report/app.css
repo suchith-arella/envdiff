@@ -260,7 +260,7 @@ td.cat { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
 .verdict-pill { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
 .verdict-pill.same { background: var(--pass-soft); color: var(--pass); }
 .verdict-pill.different { background: var(--critical-soft); color: var(--critical); }
-.verdict-pill.unreachable, .verdict-pill.skipped { background: var(--info-soft); color: var(--info); }
+.verdict-pill.unreachable, .verdict-pill.skipped, .verdict-pill.flaky { background: var(--info-soft); color: var(--info); }
 td.outcome { font-size: 12.5px; overflow-wrap: anywhere; max-width: 320px; }
 td.el { font-size: 13px; overflow-wrap: anywhere; max-width: 300px; }
 

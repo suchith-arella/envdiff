@@ -54,6 +54,7 @@ import { shortHash, compilePatterns, matchesAny, truncate } from "./util/misc.js
  * @property {string[]} findings
  * @property {{ baseline?: string, candidate?: string, diff?: string }} screenshots
  * @property {number} [visualRatio]
+ * @property {boolean} [flaky] It differed once but not when repeated.
  */
 
 /**
@@ -116,6 +117,9 @@ class Tab {
     /** The page changes by itself (tickers, carousels): DOM changes alone prove nothing. */
     this.unstable = false;
     this.probed = false;
+    /** Log positions when the page was last loaded. */
+    /** @type {Record<string, number> | null} */
+    this.loadMark = null;
   }
 
   async open() {
@@ -130,7 +134,6 @@ class Tab {
       ignoreSelectors: this.cfg.ignore.selectors,
       skipSelectors: this.cfg.explore.skip.selectors,
       allowSelectors: this.cfg.explore.allow.selectors,
-      perf: false,
     });
     annotateElements(dom.actionables, (href) => this.session.scope.keyOf(href, { ignoreQuery: this.cfg.crawl.ignoreQuery }));
     return dom;
@@ -146,6 +149,7 @@ class Tab {
     if (this.fresh && sameList(this.statePath, want) && this.inv) return null;
     const page = /** @type {import("playwright").Page} */ (this.page);
     this.fresh = false;
+    this.loadMark = /** @type {ReturnType<typeof instrumentPage>} */ (this.inst).mark();
     const load = await loadPage(page, /** @type {any} */ (this.inst), this.session.scope.urlFor(this.key), { ...this.cfg, stabilize: { ...this.cfg.stabilize, scroll: false } });
     if (load.error) return `page failed to load: ${load.error}`;
     this.statePath = [];
@@ -178,8 +182,7 @@ class Tab {
     const page = /** @type {import("playwright").Page} */ (this.page);
     const inst = /** @type {ReturnType<typeof instrumentPage>} */ (this.inst);
     const cfg = this.cfg;
-    const scope = this.session.scope;
-    const before = this.inv;
+    let before = this.inv;
     /** @type {Outcome} */
     const outcome = {
       ok: false,
@@ -200,7 +203,15 @@ class Tab {
       effect: false,
       log: inst.since(inst.mark()),
     };
-    const el = before ? relocate(before.actionables, target) : null;
+    let el = before ? relocate(before.actionables, target) : null;
+    // Content that renders only once scrolled into view isn't inventoried yet.
+    if (!el && before) el = await this.scrollToFind(target);
+    // Scroll it into view first and let the page react (sticky headers,
+    // scrollspy, reveal animations), so that doesn't count as the action's effect.
+    if (el && (await this.bringIntoView(el))) {
+      before = this.inv;
+      el = relocate(before.actionables, target);
+    }
     if (!el) {
       outcome.error = "element not found in this state";
       return outcome;
@@ -235,6 +246,45 @@ class Tab {
   }
 
   /**
+   * Scroll to where `target` sat in the page snapshot and take a fresh
+   * inventory there.
+   * @param {El} target
+   */
+  async scrollToFind(target) {
+    const page = /** @type {import("playwright").Page} */ (this.page);
+    const y = /** @type {any} */ (target).rect?.y;
+    if (typeof y !== "number") return null;
+    await page.evaluate((top) => window.scrollTo({ top: Math.max(0, top - innerHeight / 2), behavior: "instant" }), y).catch(() => {});
+    await settle(page, /** @type {any} */ (this.inst), { timeout: 2500, quietMs: 250 });
+    this.inv = await this.collect();
+    return relocate(this.inv.actionables, target);
+  }
+
+  /**
+   * Center an off-screen element and wait for the page to react to the
+   * scroll. True, with a fresh inventory, if anything moved.
+   * @param {El} el
+   */
+  async bringIntoView(el) {
+    const page = /** @type {import("playwright").Page} */ (this.page);
+    const moved = await page
+      .evaluate((i) => {
+        const e = /** @type {Element | undefined} */ (/** @type {any} */ (window).__envdiff.els[i]);
+        if (!e || !e.isConnected) return false;
+        const r = e.getBoundingClientRect();
+        if (r.top >= 0 && r.bottom <= innerHeight && r.left >= 0 && r.right <= innerWidth) return false;
+        e.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+        const now = e.getBoundingClientRect();
+        return Math.abs(now.top - r.top) > 1 || Math.abs(now.left - r.left) > 1;
+      }, el.idx)
+      .catch(() => false);
+    if (!moved) return false;
+    await settle(page, /** @type {any} */ (this.inst), { timeout: 2500, quietMs: 250 });
+    this.inv = await this.collect();
+    return true;
+  }
+
+  /**
    * Fill in what the page shows now, relative to before the action.
    * @param {Outcome} outcome
    * @param {{ before: any, beforeSig: string, beforeUrl: string, mark: any, el: El }} ctx
@@ -263,10 +313,10 @@ class Tab {
     outcome.calls = delta.requests
       .filter((r) => r.firstParty && !r.noise && ["xhr", "fetch", "document", "other"].includes(r.type) && r.failure !== "aborted")
       .map((r) => ({ key: r.key, status: r.status, failure: r.failure, blocked: r.blocked, body: r.body }));
-    // Requests this tab already made before the action (page load, polling)
-    // aren't a response to it: a poll landing inside one side's click window
-    // must not read as "the click did something there and nothing here".
-    const prior = new Set(inst.log.requests.slice(0, mark.requests).map((r) => r.key));
+    // Requests this page load already made before the action (loading,
+    // polling) aren't a response to it: a poll landing inside one side's click
+    // window must not read as "the click did something there and nothing here".
+    const prior = new Set(inst.log.requests.slice(this.loadMark?.requests ?? 0, mark.requests).map((r) => r.key));
     const newCalls = outcome.calls.filter((c) => !prior.has(c.key));
     outcome.allKeys = new Set([...prior, ...delta.requests.map((r) => r.key)]);
     if (after && before) {
@@ -467,40 +517,77 @@ export async function explorePage(ctx) {
       const item = /** @type {(typeof stack)[number]} */ (stack.pop());
       const last = item.path[item.path.length - 1];
       const prefix = item.path.slice(0, -1);
-      const [errB, errC] = await Promise.all([
-        tabs.baseline.reach(prefix.map((p) => ({ id: p.id, el: p.pair.a, option: p.option }))),
-        tabs.candidate.reach(prefix.map((p) => ({ id: p.id, el: p.pair.b, option: p.option }))),
-      ]);
       const labels = item.path.map((p) => describeEl(p.pair.a));
       const id = shortHash(`${key}|${where.viewport}|${item.path.map((p) => p.id).join(">")}`);
-      if (errB) {
-        skipped.push({ element: labels.join(" → "), reason: `baseline: ${errB}` });
+      const attempt = async () => {
+        const [errB, errC] = await Promise.all([
+          tabs.baseline.reach(prefix.map((p) => ({ id: p.id, el: p.pair.a, option: p.option }))),
+          tabs.candidate.reach(prefix.map((p) => ({ id: p.id, el: p.pair.b, option: p.option }))),
+        ]);
+        if (errB) return { errB };
+        // A page that changes by itself on either side changes the rules for
+        // both, or one side's DOM change would count and the other's wouldn't.
+        if (tabs.baseline.unstable !== tabs.candidate.unstable) tabs.baseline.unstable = tabs.candidate.unstable = true;
+        const [ob, oc] = await Promise.all([
+          tabs.baseline.act(last.pair.a, last.option),
+          errC ? Promise.resolve(failedOutcome(errC, tabs.candidate)) : tabs.candidate.act(last.pair.b, last.option),
+        ]);
+        // The candidate seems to have done less: give it a second, longer look
+        // before calling it broken (it may just be slower).
+        if (ob.ok && oc.ok && ((ob.effect && !oc.effect) || (ob.domChanged && !oc.domChanged) || (ob.navigated && !oc.navigated))) {
+          await tabs.candidate.recheck(oc);
+        }
+        // Screenshots of the after-state, both sides, while the tabs are still there.
+        const shots = await captureShots(tabs, ctx, id, ob, oc);
+        /** @type {any[]} */
+        const found = [];
+        const interaction = compareOutcomes(ob, oc, {
+          id,
+          key,
+          where,
+          labels,
+          step: last.pair,
+          option: last.option,
+          add: (/** @type {any} */ f) => (found.push(f), f),
+          shots,
+          outDir: ctx.outDir,
+          pageVisualRatio: ctx.pageVisualRatio ?? 0,
+          cfg,
+        });
+        return { errB: null, ob, oc, interaction, found };
+      };
+      let run = await attempt();
+      if (run.errB || !run.ob || !run.oc || !run.interaction || !run.found) {
+        skipped.push({ element: labels.join(" → "), reason: `baseline: ${run.errB}` });
         continue;
       }
-      const [ob, oc] = await Promise.all([
-        tabs.baseline.act(last.pair.a, last.option),
-        errC ? Promise.resolve(failedOutcome(errC, tabs.candidate)) : tabs.candidate.act(last.pair.b, last.option),
-      ]);
-      // The candidate seems to have done less: give it a second, longer look
-      // before calling it broken (it may just be slower).
-      if (ob.ok && oc.ok && ((ob.effect && !oc.effect) || (ob.domChanged && !oc.domChanged) || (ob.navigated && !oc.navigated))) {
-        await tabs.candidate.recheck(oc);
+      if (cfg.stabilize.confirm && run.found.length && !ctx.stopped()) {
+        // One-off differences come from timing: an environment still booting,
+        // a slow response, an animation caught mid-way. Do it again from a
+        // fresh load and keep only what happens both times.
+        const first = run;
+        tabs.baseline.fresh = tabs.candidate.fresh = false;
+        const again = await attempt();
+        if (again.ob && again.oc && again.interaction && again.found) {
+          const identity = (/** @type {any} */ f) => `${f.type}|${f.fp ?? ""}`;
+          const firstIds = new Set(first.found.map(identity));
+          const againIds = new Set(again.found.map(identity));
+          again.interaction.flaky = first.found.some((f) => !againIds.has(identity(f)));
+          again.found = again.found.filter((f) => firstIds.has(identity(f)));
+          for (const k of /** @type {const} */ (["baseline", "candidate", "diff"])) {
+            const rel = first.interaction.screenshots[k];
+            if (rel && rel !== again.interaction.screenshots[k]) fs.rmSync(path.join(ctx.outDir, rel), { force: true });
+          }
+          run = again;
+        }
       }
-      // Screenshots of the after-state, both sides, while the tabs are still there.
-      const shots = await captureShots(tabs, ctx, id, ob, oc);
-      const interaction = compareOutcomes(ob, oc, {
-        id,
-        key,
-        where,
-        labels,
-        step: last.pair,
-        option: last.option,
-        add,
-        shots,
-        outDir: ctx.outDir,
-        pageVisualRatio: ctx.pageVisualRatio ?? 0,
-        cfg,
-      });
+      const { ob, oc, interaction } = /** @type {{ ob: Outcome, oc: Outcome, interaction: Interaction }} */ (run);
+      interaction.findings = [];
+      for (const f of /** @type {any[]} */ (run.found)) {
+        const r = add(f);
+        if (r) interaction.findings.push(r.id);
+      }
+      if (interaction.verdict !== "unreachable" && ob.ok) interaction.verdict = interaction.findings.length ? "different" : "same";
       interactions.push(interaction);
       // Track each tab's state: an error or navigation leaves it unknown; an
       // effect moves it one step along; no effect leaves it where it was.

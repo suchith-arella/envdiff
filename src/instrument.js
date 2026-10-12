@@ -1,4 +1,4 @@
-import { normalizeRequestUrl, siteOf, THIRD_PARTY_NOISE } from "./urls.js";
+import { normalizeRequestUrl, siteOf, isOpaqueUrl, THIRD_PARTY_NOISE } from "./urls.js";
 import { shapeOf, bodyShape } from "./shape.js";
 import { compilePatterns, matchesAny, normalizeMessage, withTimeout } from "./util/misc.js";
 
@@ -147,7 +147,10 @@ export function instrumentPage(page, { scope, tokens, guard, cfg }) {
   /** @type {Set<Promise<unknown>>} */
   const pending = new Set();
   let lastActivity = Date.now();
+  let lastNavigation = 0;
   const ownSite = siteOf(scope.hostname);
+  /** Analytics, ads, bot protection: requests that say nothing about the app. */
+  const isNoise = (/** @type {string} */ url) => THIRD_PARTY_NOISE.test(url) || isOpaqueUrl(url) || matchesAny(ignoreRequests, url);
   const isFirstParty = (/** @type {string} */ url) => {
     try {
       const u = new URL(url);
@@ -208,7 +211,7 @@ export function instrumentPage(page, { scope, tokens, guard, cfg }) {
       status: null,
       failure: null,
       blocked: false,
-      noise: THIRD_PARTY_NOISE.test(url) || matchesAny(ignoreRequests, url),
+      noise: isNoise(url),
       sameOrigin: safeOrigin(url) === scope.origin,
       firstParty: isFirstParty(url),
     };
@@ -253,7 +256,7 @@ export function instrumentPage(page, { scope, tokens, guard, cfg }) {
       const ct = res.headers()["content-type"] || "";
       if (!ct.includes("json")) return;
       const url = req.url();
-      if (THIRD_PARTY_NOISE.test(url) || matchesAny(ignoreRequests, url)) return;
+      if (isNoise(url)) return;
       const len = Number(res.headers()["content-length"] || 0);
       if (len > cfg.api.maxBodyBytes) return;
       track(
@@ -299,7 +302,11 @@ export function instrumentPage(page, { scope, tokens, guard, cfg }) {
     download.cancel().catch(() => {});
   });
   page.on("framenavigated", (frame) => {
-    if (frame === page.mainFrame()) log.navigations.push(frame.url());
+    if (frame !== page.mainFrame()) return;
+    // Includes same-document navigations (pushState, replaceState, hash
+    // changes): a client-side router running again re-renders the page.
+    lastNavigation = Date.now();
+    log.navigations.push(frame.url());
   });
 
   return {
@@ -325,6 +332,10 @@ export function instrumentPage(page, { scope, tokens, guard, cfg }) {
       const now = Date.now();
       for (const { start } of inflight.values()) if (now - start < longPollMs) return false;
       return now - lastActivity >= quietMs;
+    },
+    /** No navigation, full or client-side, for `quietMs`. */
+    navigationQuiet(quietMs = 400) {
+      return Date.now() - lastNavigation >= quietMs;
     },
     /** Wait for async listeners (response bodies, popups) to finish. */
     async flush(ms = 3000) {

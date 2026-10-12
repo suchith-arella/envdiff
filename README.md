@@ -294,7 +294,17 @@ flowchart LR
 - **"Did it do anything?"** is judged from navigation, network calls, new dialogs,
   DOM/text changes, the control's own state, popups, downloads and alerts. Pages
   that change on their own (tickers, carousels) are detected, so movement alone
-  isn't taken as a response.
+  isn't taken as a response. A control is scrolled into view, and the page given
+  time to react, before it's clicked, so sticky headers and scrollspy changes
+  caused by scrolling aren't credited to the click.
+- **Look twice before reporting.** Environments differ in speed, and apps that
+  finish booting late or animate on scroll make one-off differences. A page or
+  interaction that differs is repeated in both environments, and only the
+  differences that happen both times are reported. The rest are listed as
+  "didn't reproduce" (`stabilize.confirm`).
+- **Noise that isn't the app** is left out: analytics and ad hosts, and
+  bot-protection beacons that post to a machine-generated path that is different
+  on every environment.
 
 ## Limitations
 

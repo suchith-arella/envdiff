@@ -127,7 +127,45 @@ export function segmentPattern(/** @type {string} */ seg) {
   if (/^[a-z0-9]+(?:-[a-z0-9]+)*-\d{2,}$/i.test(seg)) return ":slug";
   // A long token mixing letters and digits (but not "release-2" or "v10").
   if (/^(?=[a-z0-9_-]*\d)(?=[a-z0-9_-]*[a-z])[a-z0-9_-]{10,}$/i.test(seg) && !/^[a-z]+(?:-[a-z]+)*-?v?\d{1,2}$/i.test(seg)) return ":id";
+  if (looksGenerated(seg)) return ":id";
   return seg;
+}
+
+/** Two-letter words that show up in hand-written camelCase names (getUserById). */
+const SHORT_WORDS = /^(by|id|of|to|in|on|at|or|as|is|if|no|up|ok|my|me|we|do|go|be|an|ui|io|os|db|ip|qa|pr|js|ts|ux|v)$/i;
+
+/**
+ * A path segment a program generated rather than a person named: build ids,
+ * base64 tokens, and the per-deployment paths bot-protection scripts load from
+ * and post to (/k_yd21tBWxanHnm6fo7hD1ca/OGDYrDtQr9JQbGiu/...). Told apart by
+ * shape: mixed case that breaks into fragments too short to be words, where
+ * getUserStatus breaks into get, User, Status.
+ * @param {string} seg
+ */
+export function looksGenerated(seg) {
+  if (seg.length < 8 || !/^[A-Za-z0-9_-]+$/.test(seg)) return false;
+  if (!/[a-z]/.test(seg) || !/[A-Z]/.test(seg)) return false;
+  const words = seg
+    .split(/[_-]+|(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])/)
+    .filter((w) => /[A-Za-z]/.test(w));
+  const fragments = words.filter((w) => w.length <= 2 && !SHORT_WORDS.test(w)).length;
+  return words.length >= 3 && fragments >= 2 && fragments / words.length >= 0.5;
+}
+
+/**
+ * A URL whose path starts with a generated segment. Bot-protection and
+ * telemetry scripts served from the site's own origin use these; the path
+ * differs per environment (and often per request), so their calls can't be
+ * matched across environments and say nothing about the app.
+ * @param {string} url
+ */
+export function isOpaqueUrl(url) {
+  try {
+    const first = new URL(url).pathname.split("/").find(Boolean);
+    return !!first && looksGenerated(first);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -242,6 +280,7 @@ export function normalizeRequestUrl(url, scope, tokens) {
       .join(".");
     if (u.port) host += `:${u.port}`;
   }
+  if (isOpaqueUrl(url)) return `${host}/:opaque`;
   const segs = path.split("/").map(segmentPattern).join("/");
   const keys = [...new Set([...u.searchParams.keys()])]
     .filter((k) => !TRACKING_PARAM.test(k) && !CACHE_BUSTER_PARAM.test(k))

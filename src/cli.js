@@ -303,7 +303,11 @@ export async function main(argv) {
     log.info(
       `${report.summary.verdict === "fail" ? color.red(color.bold("FAIL")) : color.green(color.bold("PASS"))}  ` +
         `${color.red(`${counts.critical} critical`)} · ${color.yellow(`${counts.major} major`)} · ${counts.minor} minor · ${color.dim(`${counts.info} info`)}  ` +
-        color.dim(`(${report.summary.pages} pages, ${report.summary.interactions} interactions, ${formatDuration(report.meta.durationMs)})`),
+        color.dim(
+          `(${report.summary.pages} pages, ${report.summary.interactions} interactions, ${
+            report.summary.flaky ? `${report.summary.flaky} didn't reproduce, ` : ""
+          }${formatDuration(report.meta.durationMs)})`,
+        ),
     );
     log.info(`Report: ${pathToFileURL(path.join(out, "index.html")).href}`);
     if (v.json) process.stdout.write(JSON.stringify({ ...report.summary, report: path.join(out, "report.json") }) + "\n");

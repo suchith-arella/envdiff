@@ -8,6 +8,7 @@
  *   node test/fixtures/site/server.js --variant candidate --port 4102
  */
 import http from "node:http";
+import { randomInt } from "node:crypto";
 import { PNG } from "pngjs";
 
 const PRODUCTS = [
@@ -32,9 +33,30 @@ function teamPng() {
 }
 const TEAM = teamPng();
 
-/** @param {"baseline"|"candidate"} variant */
-export function createSite(variant) {
+/**
+ * A machine-generated path segment like the ones bot-protection products
+ * serve their script from and post to; different on every deployment.
+ * @param {number} n
+ */
+function token(n) {
+  const sets = ["abcdefghijklmnopqrstuvwxyz", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "0123456789"];
+  return Array.from({ length: n }, (_, i) => {
+    const set = sets[i % 3];
+    return set[randomInt(set.length)];
+  }).join("");
+}
+
+/**
+ * @param {"baseline"|"candidate"} variant
+ * @param {{ bootChunks?: number }} [opts] bootChunks: how long /story takes to
+ *   finish booting (each chunk is ~120ms of work). Deployments differ in speed.
+ */
+export function createSite(variant, opts = {}) {
   const cand = variant === "candidate";
+  // Bot protection: its script and beacon live under a per-deployment path,
+  // and it posts on every click. Identical behaviour, different URLs.
+  const BOT = `/${token(24)}/${token(16)}`;
+  const bootChunks = opts.bootChunks ?? 2;
 
   const layout = (/** @type {string} */ title, /** @type {string} */ main, /** @type {string} */ script = "") => `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -60,7 +82,7 @@ export function createSite(variant) {
 <header><nav aria-label="Main">
   <a href="/">Home</a><a href="/products">Products</a><a href="/about">About</a>
   <a href="${cand ? "/contact-us" /* REGRESSION: link points at a page that doesn't exist */ : "/contact"}">Contact</a>
-  <a href="/support">Support</a><a href="/dashboard">Dashboard</a>
+  <a href="/support">Support</a><a href="/dashboard">Dashboard</a><a href="/story">Story</a>
   <button id="menu-btn" aria-haspopup="true" aria-expanded="false">Menu</button>
 </nav>
 <div id="menu" hidden><a href="/help">Help</a><button id="dark">Dark mode</button></div>
@@ -75,6 +97,7 @@ export function createSite(variant) {
   mb.addEventListener('click', () => { menu.hidden = !menu.hidden; mb.setAttribute('aria-expanded', String(!menu.hidden)); });
   document.getElementById('dark').addEventListener('click', () => { document.body.style.background = '#eee'; });
 </script>
+<script src="${BOT}/init.js" async></script>
 ${script}
 </body></html>`;
 
@@ -225,6 +248,66 @@ ${script}
 
     "/help": (req, res) => html(res, layout("Help", `<h1>Help</h1><p>Read the FAQ.</p>`)),
 
+    // A long single-page-app style page: a fixed bar, a sticky "now reading"
+    // label that follows the scroll, sections that fade in when scrolled into
+    // view, and a late boot: after its config arrives the app works for a
+    // while, then its router runs again, re-renders and scrolls to a section.
+    // Same on both variants; only the boot speed differs between deployments.
+    "/story": (req, res) =>
+      html(
+        res,
+        layout(
+          "Story",
+          `<style>
+  .story-bar { position: fixed; left: 0; right: 0; bottom: 0; background: #1d2a44; color: #fff; padding: 8px 20px; }
+  .story-spy { position: sticky; top: 0; background: #eef2ff; padding: 6px 10px; margin: 0; z-index: 1; }
+  .chapter { min-height: 620px; border-top: 1px solid #ddd; padding-top: 10px; }
+  .reveal { opacity: 0; transform: translateY(24px); transition: opacity .5s, transform .5s; }
+  .reveal.in { opacity: 1; transform: none; }
+</style>
+<h1>Our story</h1>
+<p class="story-spy" id="spy">Now reading: Beginnings</p>
+<div id="chapters"></div>
+<div class="story-bar">Acme · since 1999</div>`,
+          `<script>
+  const CHAPTERS = [
+    { id: 'beginnings', title: 'Beginnings', text: 'Acme started in a garage in 1999.' },
+    { id: 'growth', title: 'Growth', text: 'We opened our first shop in 2004 and our second in 2009.' },
+    { id: 'today', title: 'Today', text: 'Today we ship to customers in many countries.', button: 'Show milestones' },
+    { id: 'next', title: 'What is next', text: 'New stores and a mobile app.', button: 'Download brochure' },
+  ];
+  const chapters = document.getElementById('chapters'), spy = document.getElementById('spy');
+  function render() {
+    chapters.innerHTML = CHAPTERS.map((c) => '<section class="chapter" id="' + c.id + '"><h2>' + c.title + '</h2><p class="reveal">' + c.text + '</p>' +
+      (c.button ? '<button class="reveal" data-ch="' + c.id + '">' + c.button + '</button>' : '') +
+      (c.id === 'today' ? '<ul id="milestones" hidden><li>1999 founded</li><li>2004 first shop</li></ul>' : '') + '</section>').join('');
+    const io = new IntersectionObserver((es) => es.forEach((e) => { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); } }));
+    chapters.querySelectorAll('.reveal').forEach((el) => io.observe(el));
+    chapters.querySelector('[data-ch=today]').onclick = () => { const m = document.getElementById('milestones'); m.hidden = !m.hidden; };
+    // "Download brochure" does nothing yet, on both sides.
+  }
+  addEventListener('scroll', () => {
+    let current = CHAPTERS[0].title;
+    for (const c of CHAPTERS) { const el = document.getElementById(c.id); if (el && el.getBoundingClientRect().top < 140) current = c.title; }
+    if (spy.textContent !== 'Now reading: ' + current) spy.textContent = 'Now reading: ' + current;
+  }, { passive: true });
+  const goTo = (id, behavior) => { const el = document.getElementById(id); if (el) window.scrollTo({ top: el.offsetTop - 40, behavior }); };
+  render();
+  goTo('today', 'auto');
+  fetch('/api/boot').then((r) => r.json()).then(async () => {
+    for (let i = 0; i < ${bootChunks}; i++) {
+      const t = performance.now();
+      while (performance.now() - t < 120) { /* booting */ }
+      await new Promise((r) => setTimeout(r, 60));
+    }
+    history.replaceState(null, '', location.href);
+    render();
+    goTo('today', 'smooth');
+  });
+</script>`,
+        ),
+      ),
+
     "/legacy": (req, res) => {
       if (cand) {
         // REGRESSION: server error
@@ -257,6 +340,10 @@ ${script}
       json(res, { tip: "Use the search box to find things faster." });
     },
     "/api/subscribe": (req, res) => json(res, { ok: true }),
+    "/api/boot": async (req, res) => {
+      await new Promise((r) => setTimeout(r, 300));
+      json(res, { features: ["story"] });
+    },
     "/graphql": (req, res) => json(res, { data: { recs: [{ id: 2, name: "Red hat" }, { id: 3, name: "Green scarf" }] } }),
   };
 
@@ -297,6 +384,19 @@ ${cand ? "" /* REGRESSION: button removed */ : `<button id="wish">Add to wishlis
       );
       return;
     }
+    if (url.pathname.startsWith(`${BOT}/`)) {
+      if (req.method !== "GET") {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/javascript" });
+      // Posts a beacon to a path that changes with every request, on every click.
+      res.end(`document.addEventListener("click", function () {
+  fetch("${BOT}/" + Math.random().toString(36).slice(2, 8) + "/${token(9)}", { method: "POST", body: "t=" + Date.now() }).catch(function () {});
+}, true);`);
+      return;
+    }
     const route = routes[url.pathname];
     if (!route) return notFound(res);
     try {
@@ -326,11 +426,11 @@ function notFound(res) {
 
 /**
  * Start a site on a port (0 = any free port).
- * @param {{ variant: "baseline"|"candidate", port?: number }} opts
+ * @param {{ variant: "baseline"|"candidate", port?: number, bootChunks?: number }} opts
  * @returns {Promise<{ url: string, close: () => Promise<void> }>}
  */
-export function startSite({ variant, port = 0 }) {
-  const server = createSite(variant);
+export function startSite({ variant, port = 0, bootChunks }) {
+  const server = createSite(variant, { bootChunks });
   return new Promise((resolve) => {
     server.listen(port, "127.0.0.1", () => {
       const addr = /** @type {import("node:net").AddressInfo} */ (server.address());

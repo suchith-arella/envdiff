@@ -37,7 +37,8 @@ export function renderMarkdown(report, opts = {}) {
   lines.push(`**Baseline:** ${env(meta.baseline)} · **Candidate:** ${env(meta.candidate)}`);
   lines.push(
     `${summary.pages} pages · ${summary.interactions} interactions (${summary.interactionsDifferent} behaved differently) · ${summary.journeys} journeys · ${fmtDuration(meta.durationMs)}` +
-      (summary.notCrawled ? ` · ${summary.notCrawled} more pages not crawled (limit)` : ""),
+      (summary.notCrawled ? ` · ${summary.notCrawled} more pages not crawled (limit)` : "") +
+      (summary.flaky ? ` · ${summary.flaky} one-off differences didn't reproduce and aren't reported` : ""),
   );
   if (meta.aborted) lines.push(`\n> ⚠️ ${meta.aborted}`);
   if (report.errors?.length) lines.push(`\n> ⚠️ ${report.errors.length} page(s) could not be processed; see the full report.`);
