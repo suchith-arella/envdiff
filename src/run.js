@@ -212,6 +212,8 @@ export async function run(cfg, opts = {}) {
         const compareScreens = (b, c, add) => {
           if (!b.screenshot || !c.screenshot) return null;
           const diffRel = assetPath(`${slug}-diff.png`);
+          // A diff left by the first look must not outlive a second look that has none.
+          fs.rmSync(path.join(outDir, diffRel), { force: true });
           const d = diffImages(path.join(outDir, b.screenshot), path.join(outDir, c.screenshot), path.join(outDir, diffRel), { threshold: cfg.visual.threshold });
           const visual = {
             ratio: Math.round(d.ratio * 10000) / 10000,
