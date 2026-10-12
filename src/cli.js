@@ -63,6 +63,7 @@ ${color.bold("Runtime")}
       --concurrency <n>        Pages processed in parallel (default 2)
       --browser <name>         chromium | firefox | webkit
       --channel <name>         Use an installed browser: chrome, msedge
+      --proxy <url>            Send the browser's traffic through a proxy, e.g. http://proxy.corp:3128
       --headed                 Show the browser
       --timeout <minutes>      Stop after this long and report what was done (default 45)
       --ai                     Claude triage of differences (needs ANTHROPIC_API_KEY;
@@ -118,6 +119,7 @@ const OPTIONS = /** @type {const} */ ({
   concurrency: { type: "string" },
   browser: { type: "string" },
   channel: { type: "string" },
+  proxy: { type: "string" },
   headed: { type: "boolean" },
   timeout: { type: "string" },
   ai: { type: "boolean" },
@@ -220,6 +222,7 @@ export function overridesFrom(/** @type {any} */ v, /** @type {string[]} */ posi
   if (v.concurrency !== undefined) o.concurrency = num(v.concurrency, "concurrency");
   if (v.browser) o.browser.name = v.browser;
   if (v.channel) o.browser.channel = v.channel;
+  if (v.proxy) o.browser.proxy = { server: v.proxy };
   if (v.headed) o.browser.headless = false;
   if (v.timeout !== undefined) o.timeouts.total = /** @type {number} */ (num(v.timeout, "timeout")) * 60_000;
   if (v.ai) o.ai.enabled = true;

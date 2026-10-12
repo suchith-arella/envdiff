@@ -31,6 +31,7 @@ export async function launchBrowser(cfg) {
       channel: cfg.browser.channel ?? undefined,
       executablePath: cfg.browser.executablePath ?? process.env.ENVDIFF_BROWSER_PATH ?? undefined,
       args: cfg.browser.args,
+      proxy: cfg.browser.proxy ?? undefined,
       // envdiff handles Ctrl+C itself (finish in-flight pages, write a partial
       // report); Playwright still kills the browser if the process exits.
       handleSIGINT: false,

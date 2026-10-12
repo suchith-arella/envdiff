@@ -142,6 +142,7 @@ report only what differs from the primary.
 | `userAgent` | Playwright's | |
 | `ignoreHTTPSErrors` | `false` | For self-signed certificates on internal environments. |
 | `args` | `[]` | Extra browser arguments. |
+| `proxy` | — | `{ server, bypass?, username?, password? }` to route the browser through a proxy (`--proxy http://proxy.corp:3128`). Chromium on Linux also honours `HTTPS_PROXY`. |
 
 ## `stabilize`
 

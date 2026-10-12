@@ -144,6 +144,8 @@ export const DEFAULT_CONFIG = {
     ignoreHTTPSErrors: false,
     /** Extra args passed to the browser. */
     args: /** @type {string[]} */ ([]),
+    /** Route the browser through a proxy: { server: "http://proxy:3128", bypass?, username?, password? }. */
+    proxy: /** @type {{ server: string, bypass?: string, username?: string, password?: string } | null} */ (null),
   },
 
   /** Run before anything else in each environment, e.g. a login form. */
