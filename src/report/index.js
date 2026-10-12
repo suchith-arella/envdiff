@@ -61,7 +61,9 @@ export function renderMarkdown(report, opts = {}) {
     else lines.push(`<details><summary>${header}</summary>`, "");
     lines.push("| Where | Finding |", "|---|---|");
     for (const f of items.slice(0, maxRows)) {
-      const where = f.journey ? `journey: ${f.journey}` : `${f.page ?? ""}${f.viewport && f.viewport !== "desktop" ? ` (${f.viewport})` : ""}`;
+      const where = f.journey
+        ? `journey: ${f.journey}`
+        : `${f.page ?? ""}${f.pages && f.pages.length > 1 ? ` +${f.pages.length - 1} more` : ""}${f.viewport && f.viewport !== "desktop" ? ` (${f.viewport})` : ""}`;
       const ai = f.ai ? ` _(AI: ${f.ai.verdict.replace(/_/g, " ")})_` : "";
       lines.push(`| \`${cell(where)}\` | ${cell(f.title)}${ai} |`);
     }

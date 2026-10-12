@@ -150,6 +150,8 @@ When a page counts as "ready": for `quietMs` there has been no network activity,
 
 Pages are captured from the top. envdiff checks that a page held still while it was captured (same scroll position, size, address and text before and after) and captures again if it didn't. If the app's router ran again after envdiff scrolled through the page, envdiff scrolls through it again, because a re-render can hide sections that only appear once scrolled into view.
 
+The list of controls on a page is what a person scrolling through it would see. Transitions and animations still running are jumped to their end first, as the screenshot does. A control that was on show at some point while scrolling through counts even if the page hides it again once it's off screen.
+
 | Key | Default | |
 |---|---|---|
 | `quietMs` | `400` | |

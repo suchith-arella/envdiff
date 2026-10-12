@@ -93,6 +93,27 @@ export function pageFingerprint() {
   return `${Math.round(scrollX)},${Math.round(scrollY)}|${height}|${location.href}|${text.length}:${h}`;
 }
 
+/**
+ * Jump running CSS transitions and animations to their end, as screenshots do
+ * (animations: "disabled"). Otherwise a section caught fading in reads as
+ * invisible, or a card mid-slide as moved, in the inventory while the
+ * screenshot shows it finished. Endless animations are left alone.
+ */
+export function finishAnimations() {
+  if (typeof document.getAnimations !== "function") return 0;
+  let finished = 0;
+  for (const a of document.getAnimations()) {
+    try {
+      if (a.playState !== "running" || !a.effect || a.effect.getComputedTiming().endTime === Infinity) continue;
+      a.finish();
+      finished++;
+    } catch {
+      // detached or already done
+    }
+  }
+  return finished;
+}
+
 /** Load timing as the browser recorded it. */
 export function readPerf() {
   const nav = /** @type {PerformanceNavigationTiming | undefined} */ (performance.getEntriesByType("navigation")[0]);
@@ -135,7 +156,10 @@ export function readPerf() {
  *   allowSelectors?: string[],
  *   maxActionables?: number,
  *   maxTextLines?: number,
- * }} opts
+ *   census?: boolean,
+ * }} opts `census`: only note which controls are visible right now, for pages
+ *   that show a section only while it is on screen. A control noted while
+ *   scrolling through counts as visible later, wherever the page is scrolled.
  */
 export async function collectPage(opts) {
   const w = /** @type {any} */ (window);
@@ -143,7 +167,7 @@ export async function collectPage(opts) {
   const state = (w.__envdiff = w.__envdiff || {});
   /** @type {Element[]} */
   const els = [];
-  state.els = els;
+  if (!opts.census) state.els = els;
 
   const maskSelectors = opts.maskSelectors || [];
   const ignoreSelectors = opts.ignoreSelectors || [];
@@ -398,13 +422,8 @@ export async function collectPage(opts) {
     candidates.add(el);
   }
 
-  const actionables = [];
-  for (const el of candidates) {
-    if (actionables.length >= maxActionables) break;
-    if (ignored(el)) continue;
-    if (el.closest("[aria-hidden=true],[inert]")) continue;
-    const visible = isVisible(el);
-    if (!visible) continue;
+  /** How a control looks now, for the inventory. @param {Element} el */
+  const describe = (el) => {
     const tag = el.tagName.toLowerCase();
     const role = roleOf(el);
     const anyEl = /** @type {any} */ (el);
@@ -418,7 +437,6 @@ export async function collectPage(opts) {
     else kind = "button";
     /** @type {any} */
     const item = {
-      idx: els.length,
       tag,
       role,
       kind,
@@ -450,6 +468,33 @@ export async function collectPage(opts) {
         .slice(0, 30)
         .map((o) => ({ text: cut(norm(o.textContent), 60), value: o.value, disabled: o.disabled }));
     }
+    return item;
+  };
+
+  /** @type {WeakMap<Element, any>} Controls as they looked when last seen on screen. */
+  const seen = (state.seen = state.seen || new WeakMap());
+  if (opts.census) {
+    for (const el of candidates) if (!ignored(el) && isVisible(el)) seen.set(el, describe(el));
+    return /** @type {never} */ (undefined);
+  }
+  // Seen while scrolling through, but hidden again now that it is off screen:
+  // keep it as it looked then.
+  const seenWhileScrolling = (/** @type {Element} */ el) => {
+    if (!seen.has(el) || !el.isConnected) return null;
+    const r = el.getBoundingClientRect();
+    const anyEl = /** @type {any} */ (el);
+    if (r.width < 1 || r.height < 1 || (typeof anyEl.checkVisibility === "function" && !anyEl.checkVisibility())) return null;
+    return { ...seen.get(el), rect: rectOf(el) };
+  };
+
+  const actionables = [];
+  for (const el of candidates) {
+    if (actionables.length >= maxActionables) break;
+    if (ignored(el)) continue;
+    if (el.closest("[aria-hidden=true],[inert]")) continue;
+    const item = isVisible(el) ? describe(el) : seenWhileScrolling(el);
+    if (!item) continue;
+    item.idx = els.length;
     els.push(el);
     actionables.push(item);
   }
@@ -612,22 +657,13 @@ export async function collectPage(opts) {
 }
 
 /**
- * Scroll through the page so lazy-loaded content renders, then return to the
- * top. Bounded so infinite feeds don't scroll forever.
- * @param {{ maxSteps: number, delayMs: number }} opts
+ * Scroll one step down. False once the bottom is in view.
+ * Instant, even on pages that ask for smooth scrolling.
  */
-export async function scrollThrough(opts) {
-  const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
-  const step = Math.max(200, Math.floor(innerHeight * 0.9));
-  let y = 0;
-  for (let i = 0; i < opts.maxSteps; i++) {
-    const height = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0);
-    if (y + innerHeight >= height) break;
-    y += step;
-    window.scrollTo(0, y);
-    await sleep(opts.delayMs);
-  }
-  window.scrollTo(0, 0);
-  await sleep(opts.delayMs);
+export function scrollStep() {
+  const height = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0);
+  if (scrollY + innerHeight >= height) return false;
+  window.scrollTo({ top: scrollY + Math.max(200, Math.floor(innerHeight * 0.9)), behavior: "instant" });
+  return true;
 }
 

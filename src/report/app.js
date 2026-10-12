@@ -143,7 +143,7 @@
   // ---------------------------------------------------------------- findings
   function whereOf(f) {
     if (f.journey) return "journey: " + f.journey;
-    return (f.page || "") + (f.viewport && DATA.meta.viewports.length > 1 ? " · " + f.viewport : "");
+    return (f.page || "") + (f.pages && f.pages.length > 1 ? " +" + (f.pages.length - 1) + " more" : "") + (f.viewport && DATA.meta.viewports.length > 1 ? " · " + f.viewport : "");
   }
   function findingRows(list, compact) {
     if (!list.length) return '<tr><td colspan="4" class="empty"><b>Nothing here</b>No findings match these filters.</td></tr>';
@@ -159,6 +159,12 @@
     if (f.page) {
       var pi = pageIndexFor(f.page, f.viewport);
       kv.push(["Page", pi >= 0 ? '<a href="#pages/' + pi + '">' + esc(f.page) + "</a>" : esc(f.page), true]);
+      if (f.pages && f.pages.length > 1) {
+        kv.push(["Also on", f.pages.slice(1).map(function (k) {
+          var i = pageIndexFor(k, f.viewport);
+          return i >= 0 ? '<a href="#pages/' + i + '">' + esc(k) + "</a>" : esc(k);
+        }).join(", "), true]);
+      }
     }
     if (f.viewport) kv.push(["Viewport", f.viewport]);
     if (f.journey) kv.push(["Journey", f.journey]);

@@ -19,8 +19,16 @@ import { SEVERITIES, severityRank } from "./config.js";
  * @property {any} [baseline] What the baseline showed.
  * @property {any} [candidate] What the candidate showed.
  * @property {{ baseline?: string, candidate?: string, diff?: string }} [evidence] Screenshot paths.
+ * @property {string[]} [pages] Every page an error or failed call was seen on while loading.
  * @property {{ verdict: string, confidence: number, explanation: string }} [ai]
  */
+
+/**
+ * Problems whose cause doesn't depend on the page: the same exception or
+ * failed call on every page load is one problem, reported once with the pages
+ * it was seen on.
+ */
+const SITE_WIDE = new Set(["errors.uncaught", "errors.console", "network.failed", "network.failed-asset"]);
 
 /** Glob on dotted types: "perf.*", "a11y.color-contrast", "*". */
 function typeMatcher(/** @type {string} */ pattern) {
@@ -51,7 +59,8 @@ export function createFindings(cfg) {
      */
     add(f) {
       const { fp, ...rest } = f;
-      const id = shortHash([f.type, f.page ?? "", f.viewport ?? "", f.journey ?? "", fp ?? f.title].join("|"));
+      const siteWide = SITE_WIDE.has(f.type) && !!f.page && !f.interaction && !f.journey;
+      const id = shortHash([f.type, siteWide ? "*" : f.page ?? "", siteWide ? "" : f.viewport ?? "", f.journey ?? "", fp ?? f.title].join("|"));
       if (ignoreIds.has(id) || ignoreTypes.some((m) => m(f.type))) {
         suppressed++;
         return null;
@@ -59,12 +68,15 @@ export function createFindings(cfg) {
       for (const [m, sev] of overrides) if (m(f.type) && SEVERITIES.includes(/** @type {Severity} */ (sev))) rest.severity = /** @type {Severity} */ (sev);
       const existing = byId.get(id);
       if (existing) {
-        // Same finding reached twice (e.g. two paths to one interaction): keep the worse severity.
+        // Same finding reached twice (two paths to one interaction, one error
+        // on many pages): keep the worse severity.
         if (severityRank(rest.severity) < severityRank(existing.severity)) existing.severity = rest.severity;
+        if (siteWide && f.page && existing.pages && !existing.pages.includes(f.page)) existing.pages.push(f.page);
         return existing;
       }
       /** @type {Finding} */
       const finding = { id, ...rest };
+      if (siteWide && f.page) finding.pages = [f.page];
       list.push(finding);
       byId.set(id, finding);
       return finding;

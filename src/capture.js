@@ -1,5 +1,5 @@
 import path from "node:path";
-import { collectPage, msSinceChange, pageFingerprint, readPerf, scrollThrough } from "./inpage/collect.js";
+import { collectPage, finishAnimations, msSinceChange, pageFingerprint, readPerf, scrollStep } from "./inpage/collect.js";
 import { instrumentPage } from "./instrument.js";
 import { sleep } from "./util/misc.js";
 
@@ -32,16 +32,28 @@ export async function settle(page, inst, opts = {}) {
 }
 
 /**
- * Scroll through the page so lazy and scroll-revealed content renders. Apps
- * that finish booting seconds after load run their router again and re-render,
- * which hides that content again; go round once more when that happens.
+ * Scroll through the page so lazy and scroll-revealed content renders, noting
+ * at each step which controls are on show (some pages show a section only
+ * while it is on screen). Apps that finish booting seconds after load run
+ * their router again and re-render, which hides that content again; go round
+ * once more when that happens.
  * @param {import("playwright").Page} page
  * @param {import("./instrument.js").Instrumented} inst
+ * @param {import("./config.js").Config} cfg
  */
-export async function revealAll(page, inst) {
+export async function revealAll(page, inst, cfg) {
+  const census = { census: true, ignoreSelectors: cfg.ignore.selectors };
   for (let pass = 0; pass < 3; pass++) {
     const navigations = inst.log.navigations.length;
-    await page.evaluate(scrollThrough, { maxSteps: 25, delayMs: 100 }).catch(() => {});
+    await page.evaluate(collectPage, census).catch(() => {});
+    // Bounded, so infinite feeds don't scroll forever.
+    for (let step = 0; step < 25; step++) {
+      const moved = await page.evaluate(scrollStep).catch(() => false);
+      if (!moved) break;
+      await sleep(100);
+      await page.evaluate(collectPage, census).catch(() => {});
+    }
+    await page.evaluate(() => window.scrollTo({ top: 0, left: 0, behavior: "instant" })).catch(() => {});
     await settle(page, inst, { timeout: 4000, quietMs: 300 });
     if (inst.log.navigations.length === navigations) return;
   }
@@ -107,7 +119,7 @@ export async function loadPage(page, inst, url, cfg, opts = {}) {
     await page
       .evaluate(() => Promise.race([document.fonts ? document.fonts.ready : null, new Promise((r) => setTimeout(r, 3000))]))
       .catch(() => {});
-    if (cfg.stabilize.scroll) await revealAll(page, inst);
+    if (cfg.stabilize.scroll) await revealAll(page, inst, cfg);
     revealedAt = inst.log.navigations.length;
     await waitForImages(page, 4000);
   }
@@ -352,10 +364,11 @@ async function captureStill(page, inst, cfg, capture, revealed) {
       // The router ran again since we scrolled through: what we revealed may
       // be hidden again.
       await settle(page, inst, { timeout: cfg.stabilize.maxWaitMs, quietMs: cfg.stabilize.quietMs });
-      if (cfg.stabilize.scroll) await revealAll(page, inst);
+      if (cfg.stabilize.scroll) await revealAll(page, inst, cfg);
       revealed = inst.log.navigations.length;
     }
     await scrollToTop(page, inst);
+    await page.evaluate(finishAnimations).catch(() => 0);
     const before = await page.evaluate(pageFingerprint).catch(() => null);
     await capture();
     const after = await page.evaluate(pageFingerprint).catch(() => null);

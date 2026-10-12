@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { collectPage } from "./inpage/collect.js";
+import { collectPage, finishAnimations } from "./inpage/collect.js";
 import { instrumentPage } from "./instrument.js";
 import { loadPage, settle } from "./capture.js";
 import { annotateElements, matchElements, relocate, digitless } from "./match.js";
@@ -129,6 +129,7 @@ class Tab {
 
   async collect() {
     const page = /** @type {import("playwright").Page} */ (this.page);
+    await page.evaluate(finishAnimations).catch(() => 0);
     const dom = await page.evaluate(collectPage, {
       maskSelectors: this.cfg.visual.mask,
       ignoreSelectors: this.cfg.ignore.selectors,
