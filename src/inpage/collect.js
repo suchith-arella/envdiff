@@ -383,7 +383,8 @@ export async function collectPage(opts) {
     "borderTopWidth",
     "borderTopColor",
     "borderRadius",
-    "opacity",
+    // Not opacity: it is what fades, reveals and scroll-linked effects
+    // animate, so its value depends on the moment. The screenshot shows it.
   ];
   const stylesOf = (/** @type {Element} */ el) => {
     const cs = /** @type {any} */ (getComputedStyle(el));

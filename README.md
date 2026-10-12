@@ -296,7 +296,9 @@ flowchart LR
   that change on their own (tickers, carousels) are detected, so movement alone
   isn't taken as a response. A control is scrolled into view, and the page given
   time to react, before it's clicked, so sticky headers and scrollspy changes
-  caused by scrolling aren't credited to the click.
+  caused by scrolling aren't credited to the click. When a click opens a dialog
+  in both environments, the dialogs themselves are compared, not the page
+  behind them.
 - **Look twice before reporting.** Environments differ in speed, and apps that
   finish booting late or animate on scroll make one-off differences. A page or
   interaction that differs is repeated in both environments, and only the

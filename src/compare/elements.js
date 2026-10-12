@@ -257,7 +257,6 @@ const STYLE_LABELS = /** @type {Record<string,string>} */ ({
   borderTopWidth: "border width",
   borderTopColor: "border colour",
   borderRadius: "corner radius",
-  opacity: "opacity",
 });
 
 /**

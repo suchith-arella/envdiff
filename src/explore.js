@@ -10,7 +10,7 @@ import { diffImages } from "./compare/visual.js";
 import { describeEl, elRef, CHROME } from "./compare/elements.js";
 import { routePattern } from "./urls.js";
 import { DEFAULT_DENY_TEXT, DEFAULT_DENY_PATHS } from "./config.js";
-import { shortHash, compilePatterns, matchesAny, truncate } from "./util/misc.js";
+import { shortHash, compilePatterns, matchesAny, truncate, sleep } from "./util/misc.js";
 
 /**
  * @typedef {import("./match.js").El} El
@@ -150,8 +150,13 @@ class Tab {
     if (this.fresh && sameList(this.statePath, want) && this.inv) return null;
     const page = /** @type {import("playwright").Page} */ (this.page);
     this.fresh = false;
+    const url = this.session.scope.urlFor(this.key);
+    // Start from a new document. In a hash-routed app, going to the page from
+    // another of its routes is only a route change: the app keeps its state,
+    // and may still be booting from the navigation the last click caused.
+    if (stripHash(page.url()) === stripHash(url)) await page.goto("about:blank").catch(() => {});
     this.loadMark = /** @type {ReturnType<typeof instrumentPage>} */ (this.inst).mark();
-    const load = await loadPage(page, /** @type {any} */ (this.inst), this.session.scope.urlFor(this.key), { ...this.cfg, stabilize: { ...this.cfg.stabilize, scroll: false } });
+    const load = await loadPage(page, /** @type {any} */ (this.inst), url, { ...this.cfg, stabilize: { ...this.cfg.stabilize, scroll: false } });
     if (load.error) return `page failed to load: ${load.error}`;
     this.statePath = [];
     this.inv = await this.collect();
@@ -247,15 +252,32 @@ class Tab {
   }
 
   /**
-   * Scroll to where `target` sat in the page snapshot and take a fresh
-   * inventory there.
+   * Scroll down to where `target` sat in the page snapshot, a screen at a
+   * time as a person would (some pages reveal a section only as it is
+   * scrolled past, not when jumped to), and take a fresh inventory there.
    * @param {El} target
    */
   async scrollToFind(target) {
     const page = /** @type {import("playwright").Page} */ (this.page);
     const y = /** @type {any} */ (target).rect?.y;
     if (typeof y !== "number") return null;
-    await page.evaluate((top) => window.scrollTo({ top: Math.max(0, top - innerHeight / 2), behavior: "instant" }), y).catch(() => {});
+    await page
+      .evaluate((top) => {
+        if (scrollY > Math.max(0, top - innerHeight / 2)) window.scrollTo({ top: 0, behavior: "instant" });
+      }, y)
+      .catch(() => {});
+    for (let i = 0; i < 30; i++) {
+      const more = await page
+        .evaluate((top) => {
+          const goal = Math.max(0, top - innerHeight / 2);
+          const before = scrollY;
+          window.scrollTo({ top: Math.min(goal, before + Math.max(200, Math.floor(innerHeight * 0.9))), behavior: "instant" });
+          return scrollY !== before && scrollY < goal - 1;
+        }, y)
+        .catch(() => false);
+      await sleep(100);
+      if (!more) break;
+    }
     await settle(page, /** @type {any} */ (this.inst), { timeout: 2500, quietMs: 250 });
     this.inv = await this.collect();
     return relocate(this.inv.actionables, target);
@@ -661,6 +683,9 @@ function failedOutcome(error, tab) {
  */
 async function captureShots(tabs, ctx, id, ob, oc) {
   if (!ob.effect && !oc.effect && ob.ok === oc.ok) return {};
+  // Both opened a dialog: compare the dialogs. The page behind them may sit
+  // at a different scroll position, which says nothing about the dialog.
+  const dialogs = ob.opened.length > 0 && oc.opened.length > 0;
   /** @type {{ baseline?: string, candidate?: string }} */
   const shots = {};
   await Promise.all(
@@ -668,16 +693,19 @@ async function captureShots(tabs, ctx, id, ob, oc) {
       const page = tabs[side].page;
       if (!page || page.isClosed()) return;
       const rel = ctx.assetPath(`ix-${id}-${side}.png`);
+      const options = {
+        path: path.join(ctx.outDir, rel),
+        animations: /** @type {const} */ ("disabled"),
+        caret: /** @type {const} */ ("hide"),
+        scale: /** @type {const} */ ("css"),
+        mask: tabs[side].cfg.visual.mask.map((s) => page.locator(s)),
+        maskColor: "#FF00FF",
+        timeout: 10000,
+      };
       try {
-        await page.screenshot({
-          path: path.join(ctx.outDir, rel),
-          animations: "disabled",
-          caret: "hide",
-          scale: "css",
-          mask: tabs[side].cfg.visual.mask.map((s) => page.locator(s)),
-          maskColor: "#FF00FF",
-          timeout: 10000,
-        });
+        const dialog = page.locator("dialog[open],[role=dialog],[role=alertdialog],[aria-modal=true]").filter({ visible: true }).last();
+        if (dialogs && (await dialog.count())) await dialog.screenshot(options);
+        else await page.screenshot(options);
         shots[side] = rel;
       } catch {
         // page navigated away mid-shot; leave it out
