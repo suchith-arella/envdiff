@@ -1,0 +1,305 @@
+import path from "node:path";
+import { collectPage, msSinceMutation, scrollThrough } from "./inpage/collect.js";
+import { instrumentPage } from "./instrument.js";
+import { sleep } from "./util/misc.js";
+
+/**
+ * Wait until the page stops changing: no recent network activity and no DOM
+ * mutations for `quietMs`. Bounded by `timeout`; returns whether it settled.
+ * @param {import("playwright").Page} page
+ * @param {import("./instrument.js").Instrumented} inst
+ * @param {{ timeout?: number, quietMs?: number }} [opts]
+ */
+export async function settle(page, inst, opts = {}) {
+  const timeout = opts.timeout ?? 3000;
+  const quietMs = opts.quietMs ?? 400;
+  const deadline = Date.now() + timeout;
+  await page.waitForLoadState("load", { timeout: Math.max(1, timeout) }).catch(() => {});
+  while (Date.now() < deadline) {
+    let domQuietFor = 0;
+    try {
+      domQuietFor = await page.evaluate(msSinceMutation);
+    } catch {
+      // Mid-navigation: the old document is gone and the new one isn't ready.
+      await sleep(100);
+      continue;
+    }
+    if (domQuietFor >= quietMs && inst.networkQuiet(quietMs)) return true;
+    await sleep(100);
+  }
+  return false;
+}
+
+/**
+ * Navigate and wait for the page to be screenshot-ready.
+ * @param {import("playwright").Page} page
+ * @param {import("./instrument.js").Instrumented} inst
+ * @param {string} url
+ * @param {import("./config.js").Config} cfg
+ */
+export async function loadPage(page, inst, url, cfg) {
+  const started = Date.now();
+  /** @type {import("playwright").Response | null} */
+  let mainResponse = null;
+  const onResponse = (/** @type {import("playwright").Response} */ res) => {
+    if (res.request().isNavigationRequest() && res.frame() === page.mainFrame()) mainResponse = res;
+  };
+  page.on("response", onResponse);
+  /** @type {string | null} */
+  let error = null;
+  try {
+    const res = await page.goto(url, { waitUntil: "load", timeout: cfg.timeouts.navigation });
+    if (res) mainResponse = res;
+  } catch (e) {
+    const msg = /** @type {Error} */ (e).message;
+    // A 'load' that never fires (a hung third-party script) still leaves a
+    // usable page. Only a page that never committed is a load failure.
+    if (!/Timeout/i.test(msg) || page.url() === "about:blank") error = msg.split("\n")[0].replace(/^page\.goto: /, "");
+  } finally {
+    page.off("response", onResponse);
+  }
+  if (!error) {
+    await settle(page, inst, { timeout: cfg.stabilize.maxWaitMs, quietMs: cfg.stabilize.quietMs });
+    if (cfg.stabilize.dismissConsent && (await dismissConsent(page))) await settle(page, inst, { timeout: 2000, quietMs: 300 });
+    await page
+      .evaluate(() => Promise.race([document.fonts ? document.fonts.ready : null, new Promise((r) => setTimeout(r, 3000))]))
+      .catch(() => {});
+    if (cfg.stabilize.scroll) {
+      await page.evaluate(scrollThrough, { maxSteps: 25, delayMs: 100 }).catch(() => {});
+      await settle(page, inst, { timeout: 4000, quietMs: 300 });
+    }
+    await waitForImages(page, 4000);
+  }
+  /** @type {import("playwright").Response | null} */
+  const res = mainResponse;
+  /** @type {string[]} */
+  const redirects = [];
+  if (res) {
+    let req = /** @type {import("playwright").Response} */ (res).request().redirectedFrom();
+    while (req) {
+      redirects.unshift(req.url());
+      req = req.redirectedFrom();
+    }
+  }
+  return {
+    error,
+    status: res ? /** @type {import("playwright").Response} */ (res).status() : null,
+    headers: res ? await /** @type {import("playwright").Response} */ (res).allHeaders().catch(() => ({})) : {},
+    redirects,
+    ms: Date.now() - started,
+  };
+}
+
+/**
+ * "Accept" buttons of the common consent managers. A banner left up covers
+ * controls (clicks fail with "intercepts pointer events") and differs between
+ * environments; dismissing it is the same harmless click a person makes.
+ */
+const CONSENT_BUTTONS = [
+  "#onetrust-accept-btn-handler",
+  "#accept-recommended-btn-handler",
+  "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+  "#CybotCookiebotDialogBodyButtonAccept",
+  "#truste-consent-button",
+  "#didomi-notice-agree-button",
+  '[data-testid="uc-accept-all-button"]',
+  ".fc-cta-consent",
+  "#hs-eu-confirmation-button",
+  ".cc-allow",
+  ".cc-accept-all",
+  ".cc-dismiss",
+  'button[aria-label="Accept all cookies"]',
+  'button[aria-label="Accept cookies"]',
+];
+
+/** @param {import("playwright").Page} page */
+async function dismissConsent(page) {
+  for (const sel of CONSENT_BUTTONS) {
+    const loc = page.locator(sel).first();
+    if (await loc.isVisible().catch(() => false)) {
+      await loc.click({ timeout: 2000 }).catch(() => {});
+      return true;
+    }
+  }
+  return false;
+}
+
+/** @param {import("playwright").Page} page @param {number} ms */
+async function waitForImages(page, ms) {
+  await page
+    .evaluate(async (timeout) => {
+      const pending = Array.from(document.images).filter((i) => !i.complete && i.getAttribute("src"));
+      await Promise.race([
+        Promise.all(
+          pending.map(
+            (i) =>
+              new Promise((r) => {
+                i.addEventListener("load", r, { once: true });
+                i.addEventListener("error", r, { once: true });
+              }),
+          ),
+        ),
+        new Promise((r) => setTimeout(r, timeout)),
+      ]);
+    }, ms)
+    .catch(() => {});
+}
+
+/**
+ * Full-page screenshot with masks and hidden elements applied. Width is the
+ * viewport so both environments produce comparable images; height is capped.
+ * @param {import("playwright").Page} page
+ * @param {string} file
+ * @param {import("./config.js").Config} cfg
+ * @param {{ fullPage?: boolean, scrollHeight?: number }} [opts]
+ */
+export async function screenshot(page, file, cfg, opts = {}) {
+  const fullPage = opts.fullPage ?? cfg.visual.fullPage;
+  const vp = page.viewportSize() ?? { width: 1280, height: 800 };
+  const mask = [...cfg.visual.mask].map((s) => page.locator(s));
+  const style = cfg.visual.hide.map((s) => `${s}{visibility:hidden !important}`).join("\n");
+  /** @type {import("playwright").PageScreenshotOptions} */
+  const options = {
+    path: file,
+    animations: "disabled",
+    caret: "hide",
+    scale: "css",
+    mask,
+    maskColor: "#FF00FF",
+    style: style || undefined,
+    timeout: 20000,
+  };
+  if (fullPage) {
+    const height = Math.min(Math.max(opts.scrollHeight ?? vp.height, vp.height), cfg.visual.maxHeight);
+    options.fullPage = true;
+    options.clip = { x: 0, y: 0, width: vp.width, height };
+  }
+  await page.screenshot(options);
+  return file;
+}
+
+/**
+ * Run axe-core and keep a compact summary per rule.
+ * @param {import("playwright").Page} page
+ * @param {import("./config.js").Config} cfg
+ */
+export async function runAxe(page, cfg) {
+  // The ESM entry exports the class as default; the type declarations describe the CJS shape.
+  const mod = /** @type {any} */ (await import("@axe-core/playwright"));
+  const AxeBuilder = mod.default?.default ?? mod.default ?? mod.AxeBuilder;
+  let builder = new AxeBuilder({ page }).withTags(cfg.a11y.tags);
+  for (const sel of cfg.ignore.selectors) builder = builder.exclude(sel);
+  const results = await builder.analyze();
+  return results.violations.map((v) => ({
+    id: v.id,
+    impact: v.impact ?? "minor",
+    help: v.help,
+    helpUrl: v.helpUrl,
+    count: v.nodes.length,
+    targets: v.nodes.slice(0, 5).map((n) => n.target.join(" ")),
+    html: v.nodes.slice(0, 2).map((n) => n.html.slice(0, 200)),
+  }));
+}
+
+/**
+ * @typedef {object} Snapshot
+ * @property {"baseline"|"candidate"} side
+ * @property {string} key
+ * @property {string} viewport
+ * @property {string} url
+ * @property {string} finalUrl
+ * @property {string|null} finalKey Null when the page ended up outside the environment (SSO, another site).
+ * @property {number|null} status
+ * @property {string[]} redirects
+ * @property {Record<string,string>} headers
+ * @property {string|null} error
+ * @property {number} loadMs
+ * @property {Awaited<ReturnType<typeof collectPage>> | null} dom
+ * @property {string|null} screenshot Path relative to the report directory.
+ * @property {Awaited<ReturnType<typeof runAxe>> | null} a11y
+ * @property {import("./instrument.js").PageLog} log
+ */
+
+/**
+ * Load one page in one environment and record everything about it.
+ * @param {import("./session.js").EnvSession} env
+ * @param {string} key
+ * @param {{ outDir: string, file: string, a11y: boolean, perf: boolean }} opts
+ * @returns {Promise<Snapshot>}
+ */
+export async function capturePage(env, key, opts) {
+  const { cfg } = env;
+  const page = await env.context.newPage();
+  const inst = instrumentPage(page, env);
+  const url = env.scope.urlFor(key);
+  /** @type {Snapshot} */
+  const snap = {
+    side: env.side,
+    key,
+    viewport: env.viewport.name,
+    url,
+    finalUrl: url,
+    finalKey: key,
+    status: null,
+    redirects: [],
+    headers: {},
+    error: null,
+    loadMs: 0,
+    dom: null,
+    screenshot: null,
+    a11y: null,
+    log: inst.log,
+  };
+  try {
+    const load = await loadPage(page, inst, url, cfg);
+    Object.assign(snap, {
+      status: load.status,
+      redirects: load.redirects,
+      headers: pickHeaders(load.headers),
+      error: load.error,
+      loadMs: load.ms,
+      finalUrl: page.url(),
+      finalKey: env.scope.keyOf(page.url(), { ignoreQuery: cfg.crawl.ignoreQuery }),
+    });
+    if (!load.error) {
+      snap.dom = await page.evaluate(collectPage, {
+        maskSelectors: cfg.visual.mask,
+        ignoreSelectors: cfg.ignore.selectors,
+        skipSelectors: cfg.explore.skip.selectors,
+        allowSelectors: cfg.explore.allow.selectors,
+        perf: opts.perf,
+      });
+      if (cfg.visual.enabled) {
+        await screenshot(page, path.join(opts.outDir, opts.file), cfg, { scrollHeight: snap.dom.doc.scrollHeight });
+        snap.screenshot = opts.file;
+      }
+      if (opts.a11y) snap.a11y = await runAxe(page, cfg).catch(() => null);
+    }
+  } catch (e) {
+    snap.error = snap.error ?? `Capture failed: ${/** @type {Error} */ (e).message.split("\n")[0]}`;
+  } finally {
+    await inst.flush();
+    await page.close().catch(() => {});
+  }
+  return snap;
+}
+
+const KEPT_HEADERS = [
+  "content-type",
+  "cache-control",
+  "strict-transport-security",
+  "content-security-policy",
+  "x-frame-options",
+  "x-content-type-options",
+  "referrer-policy",
+  "permissions-policy",
+  "x-robots-tag",
+];
+
+/** @param {Record<string,string>} headers */
+function pickHeaders(headers) {
+  /** @type {Record<string,string>} */
+  const out = {};
+  for (const h of KEPT_HEADERS) if (headers[h]) out[h] = headers[h].slice(0, 300);
+  return out;
+}

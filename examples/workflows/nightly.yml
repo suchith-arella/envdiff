@@ -1,0 +1,29 @@
+# Copy to .github/workflows/ in your app's repository.
+# Every weekday morning: is UAT still behaving like production?
+name: "QA: nightly UAT vs PROD"
+
+on:
+  schedule:
+    - cron: "17 5 * * 1-5" # 05:17 UTC, Monday to Friday
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      ENVDIFF_CANDIDATE_AUTH: ${{ secrets.UAT_BASIC_AUTH }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: suchith-arella/envdiff@main
+        with:
+          baseline: https://www.example.com
+          candidate: https://uat.example.com
+          config: envdiff.config.yaml
+          max-pages: "60"
+          viewports: desktop,mobile
+          click-depth: "2"
+          fail-on: major

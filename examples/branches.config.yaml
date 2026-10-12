@@ -1,0 +1,28 @@
+# Compare two branches by building and serving each locally:
+#   envdiff main feature/checkout -c envdiff.branches.yaml
+# Each branch is checked out into a temporary git worktree, installed, built,
+# and started with PORT set (baseline on `port`, candidate on `port + 1`).
+
+branches:
+  serve:
+    # repo: .                    # the git repository (default: current directory)
+    # cwd: apps/web              # app directory inside the repository
+    install: npm ci
+    build: npm run build
+    start: npm start -- --port $PORT     # must listen on $PORT
+    port: 4100
+    portEnv: PORT
+    readyPath: /
+    readyTimeout: 300            # seconds to wait for the server
+    env:
+      NODE_ENV: production
+      # API_URL: https://api.staging.example.com   # point both copies at the same backend
+
+  # Or, if every branch gets a preview deployment, skip the build entirely:
+  # urlTemplate: https://{branch}--myapp.netlify.app
+
+crawl:
+  maxPages: 20
+viewports: [desktop, mobile]
+report:
+  failOn: major

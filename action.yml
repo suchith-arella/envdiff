@@ -1,0 +1,179 @@
+name: envdiff — compare two environments
+description: Deep-compare two environments or branches of a web app. Crawls both, clicks every safe control, and reports visual and functional regressions.
+author: suchith-arella
+branding:
+  icon: columns
+  color: red
+
+inputs:
+  baseline:
+    description: Baseline URL or branch — the known-good side, e.g. production or UAT.
+    required: true
+  candidate:
+    description: Candidate URL or branch — the side with the new code.
+    required: true
+  config:
+    description: Path to an envdiff config file (YAML, JSON or JS), relative to the workspace.
+    default: ""
+  paths:
+    description: Comma-separated start pages, e.g. "/,/checkout". Default is the path of the baseline URL.
+    default: ""
+  max-pages:
+    description: Pages to compare (default 25).
+    default: ""
+  depth:
+    description: Link hops from the start pages (default 3).
+    default: ""
+  actions:
+    description: Interactions per page; 0 disables clicking (default 25).
+    default: ""
+  click-depth:
+    description: 1 clicks what is on the page; 2+ also clicks what those clicks reveal (default 1).
+    default: ""
+  viewports:
+    description: Comma-separated viewports, e.g. "desktop,mobile" or "1440x900".
+    default: ""
+  fail-on:
+    description: Fail the step when a finding at or above this severity exists — critical, major, minor or never.
+    default: critical
+  url-template:
+    description: For branch inputs, the preview URL pattern, e.g. "https://{branch}--mysite.netlify.app".
+    default: ""
+  ai:
+    description: '"true" to have Claude triage the findings (sends screenshots and findings to the Anthropic API).'
+    default: "false"
+  anthropic-api-key:
+    description: Anthropic API key, required when ai is "true". Pass a secret.
+    default: ""
+  args:
+    description: Extra command-line arguments for envdiff (see envdiff --help).
+    default: ""
+  report-dir:
+    description: Where to write the report, relative to the workspace.
+    default: envdiff-report
+  upload-artifact:
+    description: Upload the report directory as a workflow artifact.
+    default: "true"
+  artifact-name:
+    description: Name of the uploaded artifact.
+    default: envdiff-report
+  node-version:
+    description: Node.js version to run envdiff with.
+    default: "22"
+
+outputs:
+  verdict:
+    description: '"pass" or "fail" (relative to fail-on).'
+    value: ${{ steps.run.outputs.verdict }}
+  critical:
+    description: Number of critical findings.
+    value: ${{ steps.run.outputs.critical }}
+  major:
+    description: Number of major findings.
+    value: ${{ steps.run.outputs.major }}
+  minor:
+    description: Number of minor findings.
+    value: ${{ steps.run.outputs.minor }}
+  info:
+    description: Number of informational findings.
+    value: ${{ steps.run.outputs.info }}
+  report-dir:
+    description: Absolute path of the report directory.
+    value: ${{ steps.run.outputs.report-dir }}
+  exit-code:
+    description: 0 = no findings at or above fail-on, 1 = regressions found, 2 = envdiff could not run.
+    value: ${{ steps.run.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Install envdiff
+      id: install
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: |
+        npm ci --omit=dev --no-audit --no-fund --loglevel=error
+        echo "playwright=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
+
+    - name: Cache browser
+      id: browser-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/ms-playwright
+        key: envdiff-playwright-${{ runner.os }}-${{ steps.install.outputs.playwright }}
+
+    - name: Install browser
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      env:
+        CACHE_HIT: ${{ steps.browser-cache.outputs.cache-hit }}
+      run: |
+        if [ "$CACHE_HIT" = "true" ]; then
+          npx playwright install-deps chromium
+        else
+          npx playwright install --with-deps chromium
+        fi
+
+    - name: Compare
+      id: run
+      shell: bash
+      env:
+        INPUT_BASELINE: ${{ inputs.baseline }}
+        INPUT_CANDIDATE: ${{ inputs.candidate }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_PATHS: ${{ inputs.paths }}
+        INPUT_MAX_PAGES: ${{ inputs.max-pages }}
+        INPUT_DEPTH: ${{ inputs.depth }}
+        INPUT_ACTIONS: ${{ inputs.actions }}
+        INPUT_CLICK_DEPTH: ${{ inputs.click-depth }}
+        INPUT_VIEWPORTS: ${{ inputs.viewports }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_URL_TEMPLATE: ${{ inputs.url-template }}
+        INPUT_AI: ${{ inputs.ai }}
+        INPUT_ARGS: ${{ inputs.args }}
+        INPUT_REPORT_DIR: ${{ inputs.report-dir }}
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+      run: |
+        # Inputs arrive as environment variables, never interpolated into this
+        # script, so a branch name or URL can't inject shell commands.
+        args=( "$INPUT_BASELINE" "$INPUT_CANDIDATE" --out "$INPUT_REPORT_DIR" --fail-on "$INPUT_FAIL_ON" )
+        [ -n "$INPUT_CONFIG" ] && args+=( --config "$INPUT_CONFIG" )
+        [ -n "$INPUT_PATHS" ] && args+=( --paths "$INPUT_PATHS" )
+        [ -n "$INPUT_MAX_PAGES" ] && args+=( --max-pages "$INPUT_MAX_PAGES" )
+        [ -n "$INPUT_DEPTH" ] && args+=( --depth "$INPUT_DEPTH" )
+        [ -n "$INPUT_ACTIONS" ] && args+=( --actions "$INPUT_ACTIONS" )
+        [ -n "$INPUT_CLICK_DEPTH" ] && args+=( --click-depth "$INPUT_CLICK_DEPTH" )
+        [ -n "$INPUT_VIEWPORTS" ] && args+=( --viewports "$INPUT_VIEWPORTS" )
+        [ -n "$INPUT_URL_TEMPLATE" ] && args+=( --url-template "$INPUT_URL_TEMPLATE" )
+        [ "$INPUT_AI" = "true" ] && args+=( --ai )
+        # Extra arguments are word-split on purpose (no eval: nothing in them executes).
+        read -r -a extra <<< "$INPUT_ARGS"
+        set +e
+        node "$GITHUB_ACTION_PATH/bin/envdiff.js" "${args[@]}" "${extra[@]}"
+        code=$?
+        set -e
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+        # 1 = regressions: let the report upload first, fail at the end.
+        if [ "$code" -ge 2 ]; then exit "$code"; fi
+
+    - name: Upload report
+      if: always() && inputs.upload-artifact == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.report-dir }}
+        retention-days: 14
+        if-no-files-found: ignore
+
+    - name: Fail on regressions
+      if: steps.run.outputs.exit-code == '1'
+      shell: bash
+      env:
+        FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        echo "::error title=envdiff::Regressions at or above '$FAIL_ON' — see the job summary and the report artifact."
+        exit 1

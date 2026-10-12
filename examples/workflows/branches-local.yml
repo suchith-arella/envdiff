@@ -1,0 +1,40 @@
+# Copy to .github/workflows/ in your app's repository.
+# Compare the PR branch with its base branch without any deployed environment:
+# envdiff checks out each branch into a git worktree, builds it, starts it on
+# its own port, and compares the two running copies.
+#
+# Needs a config with a `branches.serve` section — see
+# examples/branches.config.yaml in the envdiff repository.
+name: "QA: branch vs branch"
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: Baseline branch
+        default: main
+      candidate:
+        description: Candidate branch
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # both branches must be available to git worktree
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: suchith-arella/envdiff@main
+        with:
+          baseline: branch:${{ inputs.baseline || github.base_ref }}
+          candidate: branch:${{ inputs.candidate || github.head_ref }}
+          config: envdiff.branches.yaml
+          fail-on: major

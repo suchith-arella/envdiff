@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - name: Build the demo report
+        run: npm run demo -- --out demo-report
+      - uses: actions/upload-artifact@v4
+        with:
+          name: demo-report
+          path: demo-report
+          retention-days: 14
+
+  # Run the published action against the fixture shop, the way a consumer would.
+  action:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --omit=dev
+      - name: Start the fixture shop (baseline and candidate)
+        run: |
+          nohup node test/fixtures/site/server.js --variant baseline --port 4101 > baseline.log 2>&1 &
+          nohup node test/fixtures/site/server.js --variant candidate --port 4102 > candidate.log 2>&1 &
+          for port in 4101 4102; do
+            for i in $(seq 1 30); do curl -sf "http://127.0.0.1:$port/" > /dev/null && break; sleep 1; done
+          done
+      - name: Compare
+        id: envdiff
+        uses: ./
+        continue-on-error: true
+        with:
+          baseline: http://127.0.0.1:4101
+          candidate: http://127.0.0.1:4102
+          viewports: desktop,mobile
+          args: --mask .clock --mask .visitors --ignore-text "Visitors online"
+          artifact-name: action-report
+      - name: Check the outputs
+        env:
+          VERDICT: ${{ steps.envdiff.outputs.verdict }}
+          CRITICAL: ${{ steps.envdiff.outputs.critical }}
+          EXIT_CODE: ${{ steps.envdiff.outputs.exit-code }}
+          OUTCOME: ${{ steps.envdiff.outcome }}
+        run: |
+          echo "verdict=$VERDICT critical=$CRITICAL exit=$EXIT_CODE outcome=$OUTCOME"
+          test "$VERDICT" = fail
+          test "$CRITICAL" -gt 0
+          test "$EXIT_CODE" = 1
+          test "$OUTCOME" = failure

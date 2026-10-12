@@ -1,0 +1,9 @@
+node_modules/
+envdiff-report/
+envdiff-demo/
+demo-report/
+*.log
+.DS_Store
+# Session files from `envdiff login` hold live cookies.
+auth*.json
+*.storage.json

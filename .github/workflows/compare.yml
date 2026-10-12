@@ -1,0 +1,72 @@
+# Run a comparison from the Actions tab: "Compare environments" → Run workflow.
+#
+# For environments behind auth, add repository secrets (Settings → Secrets and
+# variables → Actions); they are picked up automatically when present:
+#   ENVDIFF_HEADERS            "Name: value" lines sent to both environments
+#   ENVDIFF_BASELINE_HEADERS   ...baseline only
+#   ENVDIFF_CANDIDATE_HEADERS  ...candidate only
+#   ENVDIFF_BASELINE_AUTH      HTTP basic auth "user:password"
+#   ENVDIFF_CANDIDATE_AUTH
+#   ANTHROPIC_API_KEY          for the optional AI triage
+name: Compare environments
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: Baseline URL (known-good, e.g. production or UAT)
+        required: true
+      candidate:
+        description: Candidate URL (the new code, e.g. dev or a preview)
+        required: true
+      paths:
+        description: Start pages, comma-separated (blank = the URL's own path)
+        default: ""
+      max_pages:
+        description: Pages to compare
+        default: "25"
+      viewports:
+        description: Viewports (desktop, laptop, tablet, mobile or WIDTHxHEIGHT)
+        default: desktop
+      click_depth:
+        description: Click depth (1 = page controls, 2 = also what they open)
+        type: choice
+        options: ["1", "2", "3"]
+        default: "1"
+      fail_on:
+        description: Fail the run at this severity
+        type: choice
+        options: [critical, major, minor, never]
+        default: critical
+      ai:
+        description: Triage findings with Claude (needs the ANTHROPIC_API_KEY secret)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Empty when a secret isn't set, which envdiff treats as "not configured".
+    env:
+      ENVDIFF_HEADERS: ${{ secrets.ENVDIFF_HEADERS }}
+      ENVDIFF_BASELINE_HEADERS: ${{ secrets.ENVDIFF_BASELINE_HEADERS }}
+      ENVDIFF_CANDIDATE_HEADERS: ${{ secrets.ENVDIFF_CANDIDATE_HEADERS }}
+      ENVDIFF_BASELINE_AUTH: ${{ secrets.ENVDIFF_BASELINE_AUTH }}
+      ENVDIFF_CANDIDATE_AUTH: ${{ secrets.ENVDIFF_CANDIDATE_AUTH }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          baseline: ${{ inputs.baseline }}
+          candidate: ${{ inputs.candidate }}
+          paths: ${{ inputs.paths }}
+          max-pages: ${{ inputs.max_pages }}
+          viewports: ${{ inputs.viewports }}
+          click-depth: ${{ inputs.click_depth }}
+          fail-on: ${{ inputs.fail_on }}
+          ai: ${{ inputs.ai }}
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}

@@ -1,0 +1,80 @@
+# envdiff configuration. Every key is optional; command-line flags override it.
+# ${VAR} reads an environment variable (an error if unset); ${VAR:-default} doesn't fail.
+# Full reference: docs/configuration.md
+
+baseline:                         # the known-good side
+  url: https://www.example.com
+  label: PROD
+  # headers: { X-Bypass-Token: "${PROD_BYPASS}" }    # sent only to this environment's origin
+  # httpCredentials: { username: "${PROD_USER}", password: "${PROD_PASS}" }
+  # storageState: auth/prod.json                    # from `envdiff login https://www.example.com --save auth/prod.json`
+
+candidate:                        # the side with the new code
+  url: https://uat.example.com
+  label: UAT
+  # httpCredentials: { username: "${UAT_USER}", password: "${UAT_PASS}" }
+
+# Log in before comparing (runs once per environment; mutations allowed during login).
+# auth:
+#   loginUrl: /login
+#   steps:
+#     - fill: { label: Email, value: "${QA_USER}" }
+#     - fill: { label: Password, value: "${QA_PASSWORD}" }
+#     - click: { role: button, name: Sign in }
+#   successUrl: "**/account**"      # or successSelector: "[data-testid=avatar]"
+
+crawl:
+  startPaths: ["/"]
+  maxPages: 25
+  maxDepth: 3
+  samplesPerPattern: 2            # /products/1 and /products/2, not all 500 products
+  exclude: ["^/admin", "^/blog/"]
+  # include: ["^/shop"]           # only crawl these
+  # sitemap: true
+
+explore:
+  maxActionsPerPage: 25           # 0 = don't click anything
+  depth: 1                        # 2 = also click what clicks reveal (menus, dialogs)
+  skip:
+    text: ["Chat with us"]        # never click controls whose name matches
+    selectors: [".intercom-launcher"]
+
+safety:
+  allowMutations: false           # true only for disposable data: lets clicks POST/PUT/PATCH/DELETE
+  # allowRequests: ["/api/search"]   # POST endpoints that only read
+
+viewports: [desktop, mobile]      # desktop, laptop, tablet, mobile or { name, width, height }
+
+visual:
+  mask: [".timestamp", "[data-testid=ad-slot]", ".carousel"]   # painted over before screenshots
+  hide: ["#cookie-banner"]
+  # freezeTime: "2025-01-01T10:00:00Z"
+
+ignore:
+  text: ["Build \\w+", "Last updated .*"]
+  console: ["Download the React DevTools"]
+  requests: ["/telemetry", "googletagmanager"]
+  # findings: ["perf.*", "1aa2a4092b"]   # finding types or ids to accept
+
+stabilize:
+  ignoreMutations: [".carousel", ".live-ticker"]   # don't wait for these to stop moving
+
+# Scripted flows, compared step by step.
+# journeys:
+#   - name: Checkout
+#     steps:
+#       - goto: /products/1
+#       - click: { role: button, name: Add to cart }
+#       - click: { role: link, name: Cart }
+#       - expectText: { selector: h1, text: Your cart }
+#       - screenshot: Cart
+
+report:
+  outDir: envdiff-report
+  failOn: critical                # critical | major | minor | never
+
+# severity: { "perf.*": info, "seo.title": info }    # re-grade finding types
+
+# ai:
+#   enabled: true                 # needs ANTHROPIC_API_KEY; sends screenshots to the Anthropic API
+#   model: claude-opus-5-5

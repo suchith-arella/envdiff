@@ -1,0 +1,48 @@
+# Copy to .github/workflows/ in your app's repository.
+# Actions tab → "QA: compare environments" → Run workflow → paste two URLs.
+name: "QA: compare environments"
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: Baseline URL (known-good)
+        required: true
+        default: https://www.example.com
+      candidate:
+        description: Candidate URL (new code)
+        required: true
+        default: https://uat.example.com
+      paths:
+        description: Start pages, comma-separated (blank = home)
+        default: ""
+      viewports:
+        description: Viewports
+        default: desktop,mobile
+      fail_on:
+        type: choice
+        options: [critical, major, minor, never]
+        default: critical
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # Optional, from repository secrets. Headers go only to the environment's own origin.
+      ENVDIFF_HEADERS: ${{ secrets.ENVDIFF_HEADERS }}
+      ENVDIFF_BASELINE_AUTH: ${{ secrets.ENVDIFF_BASELINE_AUTH }}
+      ENVDIFF_CANDIDATE_AUTH: ${{ secrets.ENVDIFF_CANDIDATE_AUTH }}
+    steps:
+      - uses: actions/checkout@v4 # only needed if you use a config file from the repo
+      - uses: suchith-arella/envdiff@main
+        with:
+          baseline: ${{ inputs.baseline }}
+          candidate: ${{ inputs.candidate }}
+          paths: ${{ inputs.paths }}
+          viewports: ${{ inputs.viewports }}
+          fail-on: ${{ inputs.fail_on }}
+          # config: envdiff.config.yaml
