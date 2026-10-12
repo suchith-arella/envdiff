@@ -318,6 +318,10 @@ flowchart LR
   beyond it are listed under "Not clicked". Site-wide controls are clicked once per run.
 - Environments with very different data produce text and visual differences that
   are real but expected. Masks, ignores and the AI triage are the tools for that.
+- Full-page screenshots show a page as it stands at the top. A section that a
+  page hides again once it scrolls out of view can be caught hidden on one side;
+  its controls are still compared (they're noted while scrolling through), and
+  such a difference is usually small and listed as minor.
 
 ## Development
 

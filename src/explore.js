@@ -561,7 +561,7 @@ export async function explorePage(ctx) {
           await tabs.candidate.recheck(oc);
         }
         // Screenshots of the after-state, both sides, while the tabs are still there.
-        const shots = await captureShots(tabs, ctx, id, ob, oc);
+        const shots = await captureShots(tabs, ctx, id, ob, oc, last.pair);
         /** @type {any[]} */
         const found = [];
         const interaction = compareOutcomes(ob, oc, {
@@ -680,8 +680,9 @@ function failedOutcome(error, tab) {
  * @param {string} id
  * @param {Outcome} ob
  * @param {Outcome} oc
+ * @param {Step} step The control that was acted on, on each side.
  */
-async function captureShots(tabs, ctx, id, ob, oc) {
+async function captureShots(tabs, ctx, id, ob, oc, step) {
   if (!ob.effect && !oc.effect && ob.ok === oc.ok) return {};
   // Both opened a dialog: compare the dialogs. The page behind them may sit
   // at a different scroll position, which says nothing about the dialog.
@@ -690,9 +691,29 @@ async function captureShots(tabs, ctx, id, ob, oc) {
   const shots = {};
   await Promise.all(
     /** @type {const} */ (["baseline", "candidate"]).map(async (side) => {
-      const page = tabs[side].page;
+      const tab = tabs[side];
+      const page = tab.page;
       if (!page || page.isClosed()) return;
       const rel = ctx.assetPath(`ix-${id}-${side}.png`);
+      const outcome = side === "baseline" ? ob : oc;
+      // Frame both screenshots the same way: the control that was clicked,
+      // centred, with what it opened or changed around it. Apps scroll on
+      // their own after an expand, and not always to the same pixel.
+      if (!dialogs && outcome.ok && !outcome.navigated && tab.inv) {
+        const el = relocate(tab.inv.actionables, side === "baseline" ? step.a : step.b);
+        if (el) {
+          const moved = await page
+            .evaluate((i) => {
+              const e = /** @type {Element | undefined} */ (/** @type {any} */ (window).__envdiff.els[i]);
+              if (!e || !e.isConnected) return false;
+              const before = e.getBoundingClientRect().top;
+              e.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+              return Math.abs(e.getBoundingClientRect().top - before) > 1;
+            }, el.idx)
+            .catch(() => false);
+          if (moved) await settle(page, /** @type {any} */ (tab.inst), { timeout: 2000, quietMs: 250 });
+        }
+      }
       const options = {
         path: path.join(ctx.outDir, rel),
         animations: /** @type {const} */ ("disabled"),
