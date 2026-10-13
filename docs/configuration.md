@@ -191,7 +191,7 @@ The list of controls on a page is what a person scrolling through it would see. 
 |---|---|
 | `text` | Regexes removed from text before comparing. |
 | `console` | Console messages and exceptions to ignore. |
-| `requests` | Request URL regexes to ignore (failures and API shapes). Common analytics, ads and session-replay hosts are ignored already, as are same-origin calls whose path starts with a machine-generated segment (`/k_yd21tBWxanHnm6fo7hD1ca/...`): bot-protection scripts post there, and the path differs per environment. |
+| `requests` | Request URL regexes to ignore (failures and API shapes). Common analytics, ads and session-replay hosts are ignored already, as are same-origin calls whose path starts with a machine-generated segment (`/q_Rb83nWfxeJtPm2ka9vL0dZ/...`): bot-protection scripts post there, and the path differs per environment. |
 | `selectors` | Elements ignored for controls, text, forms and accessibility. |
 | `findings` | Finding ids (shown in the report) or type globs (`perf.*`, `a11y.color-contrast`) to drop. |
 

@@ -74,11 +74,11 @@ test("siteOf and looksLikeAsset", () => {
 });
 
 test("generated path segments are told apart from hand-written names", () => {
-  // Real bot-protection paths from two environments of one site, and a build id.
-  for (const seg of ["k_yd21tBWxanHnm6fo7hD1ca", "xTsLSE6E5_URAqQHKRCmyyWZ", "OGDYrDtQr9JQbGiu", "UjJsPUo0", "ICVUweD2s", "MGstPDcC", "Y5dpSiPXdsRERpbKFAGTx"]) {
+  // Shaped like bot-protection path segments on two environments of one site, and a build id.
+  for (const seg of ["q_Rb83nWfxeJtPm2ka9vL0dZ", "mHwQ7tR2_ZkpLvB9sXydNEcU", "TzKqWe4Vb8NmPaXo", "XsLqDy7e", "BqKpXt8Lm", "VrTnLq3w", "Y5dpSiPXdsRERpbKFAGTx"]) {
     assert.ok(looksGenerated(seg), seg);
   }
-  for (const seg of ["getUserStatus", "restAuth", "getUserById", "MyAPIClient", "OAuth2Callback", "XMLHttpRequest", "toJSONString", "treasury-margin", "remoteEntry_122.js", "SecuritiesLending"]) {
+  for (const seg of ["getUserStatus", "restApi", "getUserById", "MyAPIClient", "OAuth2Callback", "XMLHttpRequest", "toJSONString", "order-history", "remoteEntry_42.js", "AccountSettings"]) {
     assert.ok(!looksGenerated(seg), seg);
   }
   assert.equal(segmentPattern("dQw4w9WgXcQ"), ":id");
@@ -89,12 +89,12 @@ test("calls to per-environment generated paths compare equal and are recognisabl
   const a = new Scope("https://www.example.com/");
   const b = new Scope("https://uat.example.com/");
   const tokens = envTokens(a.host, b.host);
-  const prod = "https://www.example.com/k_yd21tBWxanHnm6fo7hD1ca/OGDYrDtQr9JQbGiu/J3xHYExPAQ/UjJsPUo0/DB4";
-  const uat = "https://uat.example.com/xTsLSE6E5_URAqQHKRCmyyWZ/Vua5tz8h3YVwrG/JGkkPDcC/By/ICVUweD2s";
+  const prod = "https://www.example.com/q_Rb83nWfxeJtPm2ka9vL0dZ/TzKqWe4Vb8NmPaXo/HpQzVx7wTe/XsLqDy7e/Qf2";
+  const uat = "https://uat.example.com/mHwQ7tR2_ZkpLvB9sXydNEcU/Fh6kRtZ2nWq9Xb/VrTnLq3w/Jc/BqKpXt8Lm";
   assert.equal(normalizeRequestUrl(prod, a, tokens.baseline), "{self}/:opaque");
   assert.equal(normalizeRequestUrl(uat, b, tokens.candidate), "{self}/:opaque");
   assert.ok(isOpaqueUrl(prod) && isOpaqueUrl(uat));
-  assert.ok(!isOpaqueUrl("https://www.example.com/pbo/restAuth/getUserStatus?_=1"));
+  assert.ok(!isOpaqueUrl("https://www.example.com/api/auth/getUserStatus?_=1"));
   assert.ok(!isOpaqueUrl("https://www.example.com/_next/data/Y5dpSiPXdsRERpbKFAGTx/index.json"));
   // A build id inside an otherwise ordinary path still matches across deployments.
   assert.equal(

@@ -137,7 +137,7 @@ const SHORT_WORDS = /^(by|id|of|to|in|on|at|or|as|is|if|no|up|ok|my|me|we|do|go|
 /**
  * A path segment a program generated rather than a person named: build ids,
  * base64 tokens, and the per-deployment paths bot-protection scripts load from
- * and post to (/k_yd21tBWxanHnm6fo7hD1ca/OGDYrDtQr9JQbGiu/...). Told apart by
+ * and post to (/q_Rb83nWfxeJtPm2ka9vL0dZ/TzKqWe4Vb8NmPaXo/...). Told apart by
  * shape: mixed case that breaks into fragments too short to be words, where
  * getUserStatus breaks into get, User, Status.
  * @param {string} seg
