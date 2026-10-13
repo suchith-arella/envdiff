@@ -190,7 +190,7 @@ ${script}
           "About",
           `<h1>About us</h1>
 <p>Acme was founded in 1999 by people who like things.</p>
-<p>${cand ? "We ship to 12 countries." /* REGRESSION: copy changed */ : "We ship to 40 countries."}</p>
+<p>${cand ? "We ship within Europe only." /* REGRESSION: copy changed */ : "We ship to 40 countries."}</p>
 <img src="${cand ? "/img/team-v2.png" /* REGRESSION: broken image */ : "/img/team.png"}" ${cand ? "" /* REGRESSION: no alt */ : 'alt="Our team"'} width="120" height="80">`,
         ),
       );

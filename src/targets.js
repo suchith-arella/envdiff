@@ -16,20 +16,24 @@ import { slugify, sleep } from "./util/misc.js";
  */
 
 /**
- * Is this input a URL or a branch? An explicit `url:` / `branch:` prefix
- * always wins. Bare hosts (uat.example.com, localhost:3000) are URLs.
+ * Is this input a URL, a named environment or a branch? An explicit `url:`,
+ * `env:` or `branch:` prefix always wins. Bare hosts (uat.example.com,
+ * localhost:3000) are URLs; names in `environments` (dev, uat, prod) are
+ * environments; anything else is a branch.
  * @param {string} input
- * @returns {{ kind: "url", url: string } | { kind: "branch", ref: string }}
+ * @param {Set<string>} [environments] Known environment names, lower-case.
+ * @returns {{ kind: "url", url: string } | { kind: "branch", ref: string } | { kind: "env", name: string }}
  */
-export function classifyTarget(input) {
+export function classifyTarget(input, environments = new Set()) {
   const s = String(input ?? "").trim();
   if (!s) throw new ConfigError("Empty baseline/candidate");
-  const prefixed = /^(url|branch|ref):(.+)$/i.exec(s);
+  const prefixed = /^(url|branch|ref|env):(.+)$/i.exec(s);
   if (prefixed) {
-    return prefixed[1].toLowerCase() === "url"
-      ? { kind: "url", url: withScheme(prefixed[2].trim()) }
-      : { kind: "branch", ref: prefixed[2].trim() };
+    const kind = prefixed[1].toLowerCase();
+    if (kind === "env") return { kind: "env", name: prefixed[2].trim() };
+    return kind === "url" ? { kind: "url", url: withScheme(prefixed[2].trim()) } : { kind: "branch", ref: prefixed[2].trim() };
   }
+  if (environments.has(s.toLowerCase())) return { kind: "env", name: s };
   if (/^https?:\/\//i.test(s)) return { kind: "url", url: s };
   if (/^(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)(:\d+)?(\/.*)?$/i.test(s)) return { kind: "url", url: `http://${s}` };
   // host.tld[:port][/path] with an alphabetic TLD — v1.2.3 and release-1.2 stay branches.
@@ -127,6 +131,7 @@ export async function resolveTargets(cfg, { log, outDir }) {
         `"${spec.ref}" looks like a branch name, but there is no way to load a branch.\n` +
           `  Either pass a URL template:  --url-template "https://{branch}.preview.example.com"\n` +
           `  or configure branches.serve to build and serve it locally (see docs/configuration.md).\n` +
+          `  If it is an environment, give its address: ENVDIFF_${spec.ref.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_URL=https://…\n` +
           `  If it is actually a host, prefix it: url:${spec.ref}`,
       );
     }

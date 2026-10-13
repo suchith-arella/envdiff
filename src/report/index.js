@@ -33,7 +33,8 @@ export function renderMarkdown(report, opts = {}) {
   const lines = [];
   lines.push(`## envdiff — ${cell(meta.title)}: ${verdict}`);
   lines.push("");
-  const env = (/** @type {any} */ e) => `[${cell(e.label)}](${e.url})${e.ref ? ` (\`${cell(e.ref)}\`${e.sha ? ` @ ${e.sha.slice(0, 7)}` : ""})` : ""}`;
+  const who = (/** @type {any} */ l) => (l ? ` as ${cell(l.user && l.user !== "default" ? l.user : l.username || "the default user")}` : "");
+  const env = (/** @type {any} */ e) => `[${cell(e.label)}](${e.url})${e.ref ? ` (\`${cell(e.ref)}\`${e.sha ? ` @ ${e.sha.slice(0, 7)}` : ""})` : ""}${who(e.login)}`;
   lines.push(`**Baseline:** ${env(meta.baseline)} · **Candidate:** ${env(meta.candidate)}`);
   lines.push(
     `${summary.pages} pages · ${summary.interactions} interactions (${summary.interactionsDifferent} behaved differently) · ${summary.journeys} journeys · ${fmtDuration(meta.durationMs)}` +

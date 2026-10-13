@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import YAML from "yaml";
+import { applyEnvironments } from "./environments.js";
 
 /** Ordered from most to least severe. */
 export const SEVERITIES = /** @type {const} */ (["critical", "major", "minor", "info"]);
@@ -61,6 +62,22 @@ export const DEFAULT_CONFIG = {
   /** @type {EnvConfig} */
   candidate: {},
 
+  /**
+   * Named environments, so `envdiff prod uat` works. Each takes the same
+   * settings as baseline/candidate, plus the users that can log in to it:
+   *
+   *   prod: { url: https://www.example.com }
+   *   uat:  { url: https://uat.example.com, users: { admin: { username: "${UAT_ADMIN}", password: "${UAT_ADMIN_PW}" } } }
+   *
+   * Without a config file, ENVDIFF_<ENV>_URL names an environment and
+   * ENVDIFF_<ENV>[_<USER>]_USERNAME / _PASSWORD log in to it.
+   * @type {Record<string, EnvConfig & { users?: Record<string, { username: string, password: string, totp?: string }> }>}
+   */
+  environments: {},
+
+  /** The user to log in as in both environments; null = the default user, "none" = don't log in. */
+  user: /** @type {string|null} */ (null),
+
   /** How to turn a branch name into something we can load. */
   branches: {
     /** e.g. "https://{branch}.preview.example.com" — {branch} is slugified, {branch_raw} is not. */
@@ -102,6 +119,8 @@ export const DEFAULT_CONFIG = {
     includeLinks: false,
     /** Exercise <select> elements by picking another option. */
     selects: true,
+    /** Point at charts and compare their tooltips: up to `charts` charts per page, `points` points each. */
+    hover: { charts: 4, points: 3 },
     actionTimeout: 4000,
     settleTimeout: 2500,
     /** Which viewports get interaction exploration: "first" or "all". */
@@ -126,6 +145,12 @@ export const DEFAULT_CONFIG = {
     /** GraphQL operations that are queries are always allowed; mutations are blocked. */
     graphql: true,
     useDefaultDenyList: true,
+    /**
+     * Let bot-protection sensors post (to machine-generated paths such as
+     * /q_Rb83nWfxeJtPm2ka9vL0dZ/…). They change no data, and blocking them
+     * can get the session flagged, after which the app's own calls fail.
+     */
+    allowBotSensors: true,
   },
 
   /** @type {(string | ViewportConfig)[]} */
@@ -148,7 +173,11 @@ export const DEFAULT_CONFIG = {
     proxy: /** @type {{ server: string, bypass?: string, username?: string, password?: string } | null} */ (null),
   },
 
-  /** Run before anything else in each environment, e.g. a login form. */
+  /**
+   * How to log in, for every environment that doesn't say otherwise. With
+   * credentials (ENVDIFF_<ENV>_USERNAME / _PASSWORD) and no auth at all, the
+   * login form is found from the start page and filled in automatically.
+   */
   auth: /** @type {AuthConfig|null} */ (null),
 
   stabilize: {
@@ -160,6 +189,32 @@ export const DEFAULT_CONFIG = {
     scroll: true,
     /** Click "Accept" on common cookie-consent banners (OneTrust, Cookiebot, …). */
     dismissConsent: true,
+    /**
+     * Loading indicators to wait out before looking at a page: a grid's
+     * "Loading…" overlay, a chart's loading label, spinners. One that stays
+     * up after everything else is quiet is given up on after a few seconds.
+     */
+    busySelectors: [
+      ".ag-overlay-loading-wrapper",
+      ".ag-overlay-loading-center",
+      ".highcharts-loading:not(.highcharts-loading-hidden)",
+      "[aria-busy=true]",
+      "mat-spinner",
+      "mat-progress-spinner",
+      ".mat-mdc-progress-spinner",
+      "mat-progress-bar[mode=indeterminate]",
+      ".spinner-border",
+      ".spinner-grow",
+      ".loading-spinner",
+      ".p-progress-spinner",
+      ".k-loading-mask",
+      ".el-loading-mask",
+      ".ant-spin-spinning",
+      ".MuiCircularProgress-root",
+      ".blockUI",
+      ".ngx-spinner-overlay",
+      ".loading-overlay",
+    ],
     /**
      * Look twice before reporting: when a page or an interaction differs,
      * repeat it in both environments and keep only differences that happen
@@ -235,6 +290,17 @@ export const DEFAULT_CONFIG = {
     maxBodyBytes: 1_000_000,
   },
 
+  /**
+   * Do the two environments hold the same data? Usually not (UAT and
+   * production each have their own), so by default: numbers in text are
+   * compared for format, not value; grid cells for format (currency, dates,
+   * decimals, NaN), not value; charts for series, not points; and grids and
+   * charts are left out of pixel comparisons. "same" — two builds against one
+   * backend — compares all of it as is.
+   * @type {"different"|"same"}
+   */
+  data: "different",
+
   /** @type {JourneyConfig[]} */
   journeys: [],
 
@@ -278,6 +344,9 @@ export const DEFAULT_CONFIG = {
  * @property {string} [storageState] Playwright storage state file (cookies + localStorage).
  * @property {{name: string, value: string, domain?: string, path?: string}[]} [cookies]
  * @property {AuthConfig} [auth]
+ * @property {string} [env] A named environment (see environments) this side is.
+ * @property {string} [user] The user to log in as on this side (overrides `user`).
+ * @property {{ user: string, username: string | null, source: string, totpVar?: string } | null} [login] Who is logged in, without the secret parts. Set by envdiff.
  */
 
 /**
@@ -296,8 +365,14 @@ export const DEFAULT_CONFIG = {
 
 /**
  * @typedef {object} AuthConfig
- * @property {string} [loginUrl] Path or URL of the login page.
- * @property {StepConfig[]} steps
+ * @property {string} [loginUrl] Path or URL of the page with the login form (default: the start page; a "Log in" link there is followed).
+ * @property {StepConfig[]} [steps] A scripted login, for forms the automatic one can't handle. {{username}}, {{password}} and {{totp}} are filled in.
+ * @property {string} [username] Normally from ENVDIFF_<ENV>_USERNAME instead.
+ * @property {string} [password] Normally from ENVDIFF_<ENV>_PASSWORD instead.
+ * @property {string} [totp] Authenticator secret (base32 or otpauth:// URI), for logins that ask for a one-time code.
+ * @property {string} [usernameSelector] Point the automatic login at the right fields when it guesses wrong.
+ * @property {string} [passwordSelector]
+ * @property {string} [submitSelector]
  * @property {string} [successUrl] Glob the URL must match afterwards.
  * @property {string} [successSelector] Element that must be visible afterwards.
  */
@@ -444,7 +519,8 @@ export function resolveViewport(v) {
  * Merge defaults, file config and CLI overrides, then validate.
  * @param {Record<string, any>} [fileConfig]
  * @param {Record<string, any>} [overrides]
- * @param {{ warn?: (msg: string) => void }} [opts]
+ * @param {{ warn?: (msg: string) => void, env?: NodeJS.ProcessEnv }} [opts]
+ *   `env`: where ENVDIFF_<ENV>_* variables are read from (default process.env).
  * @returns {ResolvedConfig}
  */
 export function resolveConfig(fileConfig = {}, overrides = {}, opts = {}) {
@@ -454,6 +530,11 @@ export function resolveConfig(fileConfig = {}, overrides = {}, opts = {}) {
   }
   /** @type {any} */
   const cfg = mergeDeep(mergeDeep(DEFAULT_CONFIG, fileConfig), overrides);
+  applyEnvironments(cfg, opts.env ?? process.env);
+  if (!!cfg.baseline.login !== !!cfg.candidate.login) {
+    const [inn, out] = cfg.baseline.login ? ["baseline", "candidate"] : ["candidate", "baseline"];
+    warn(`Logging in to the ${inn} (${cfg[inn].label ?? inn}) but not to the ${out} (${cfg[out].label ?? out}): pages will differ for that reason alone.`);
+  }
 
   cfg.viewports = (cfg.viewports?.length ? cfg.viewports : ["desktop"]).map(resolveViewport);
   const names = new Set();
@@ -490,6 +571,9 @@ export function resolveConfig(fileConfig = {}, overrides = {}, opts = {}) {
   }
   if (!["minor", "moderate", "serious", "critical"].includes(cfg.a11y.minImpact)) {
     throw new ConfigError(`a11y.minImpact must be minor, moderate, serious or critical`);
+  }
+  if (!["different", "same"].includes(cfg.data)) {
+    throw new ConfigError(`data must be "different" or "same" — got "${cfg.data}"`);
   }
   if (!SEVERITIES.includes(cfg.ai.minSeverity)) {
     throw new ConfigError(`ai.minSeverity must be one of ${SEVERITIES.join(", ")}`);

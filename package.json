@@ -18,11 +18,12 @@
   ],
   "scripts": {
     "test": "node --test test/unit/*.test.js",
-    "test:e2e": "node --test --test-concurrency=1 test/inpage.test.js test/e2e.test.js test/branches.test.js",
+    "test:e2e": "node --test --test-concurrency=1 test/inpage.test.js test/e2e.test.js test/app.test.js test/branches.test.js",
     "test:all": "npm test && npm run test:e2e",
     "typecheck": "tsc -p jsconfig.json",
     "fixture": "node test/fixtures/site/server.js",
-    "demo": "node test/demo.js"
+    "demo": "node test/demo.js",
+    "fixture:app": "node test/fixtures/app/server.js"
   },
   "engines": {
     "node": ">=20"
@@ -54,6 +55,7 @@
   "devDependencies": {
     "@types/node": "^22.20.5",
     "@types/pngjs": "^6.0.5",
+    "ag-grid-community": "36.2.0",
     "typescript": "^5.9.3"
   }
 }

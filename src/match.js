@@ -55,7 +55,10 @@ export function annotateElements(els, keyOfHref) {
   /** @type {Map<string, number>} */
   const seen = new Map();
   for (const e of els) {
-    const base = `${e.role}|${digitless(e.name) || e.testId || e.nameAttr || e.cssPath}|${e.landmark}`;
+    // A control in a grid row is known by its place (grid, row, column):
+    // the row's data differs between environments.
+    const name = /** @type {any} */ (e).dataRow ? `row:${/** @type {any} */ (e).dataRow}` : digitless(e.name) || e.testId || e.nameAttr || e.cssPath;
+    const base = `${e.role}|${name}|${e.landmark}`;
     const n = seen.get(base) ?? 0;
     seen.set(base, n + 1);
     e.key = `${base}#${n}`;

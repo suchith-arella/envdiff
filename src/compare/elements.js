@@ -40,8 +40,9 @@ export function compareElements(domA, domB, ctx) {
     seen.add(sig);
     return true;
   };
-  const A = domA.actionables;
-  const B = domB.actionables;
+  // Grid headers and rows, chart legends: the grid and chart checks cover them.
+  const A = domA.actionables.filter((e) => !(/** @type {any} */ (e).inData));
+  const B = domB.actionables.filter((e) => !(/** @type {any} */ (e).inData));
   const { pairs, onlyA: allOnlyA, onlyB: allOnlyB } = matchElements(A, B);
   const onlyA = allOnlyA.filter((e) => once(e, "missing"));
   const onlyB = allOnlyB.filter((e) => once(e, "new"));

@@ -19,13 +19,16 @@ const DYNAMIC = /** @type {[RegExp, string][]} */ ([
 
 /**
  * @param {string[]} lines
- * @param {{ normalize: boolean, ignore: RegExp[] }} opts
+ * @param {{ normalize: boolean, ignore: RegExp[], numbers?: boolean }} opts
+ *   `numbers`: blank out numbers too ("Revenue $1,204,330" -> "Revenue $#"),
+ *   for environments that hold different data.
  */
 export function normalizeLines(lines, opts) {
   return lines
     .map((line) => {
       let l = line;
       if (opts.normalize) for (const [re, rep] of DYNAMIC) l = l.replace(re, rep);
+      if (opts.numbers) l = l.replace(/\d+(?:[.,]\d+)*/g, "#");
       for (const re of opts.ignore) l = l.replace(new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g"), "‹ignored›");
       return l.trim();
     })
@@ -39,7 +42,7 @@ export function normalizeLines(lines, opts) {
  * @param {import("../config.js").Config} cfg
  */
 export function compareText(a, b, cfg) {
-  const opts = { normalize: cfg.text.normalize, ignore: compilePatterns(cfg.ignore.text) };
+  const opts = { normalize: cfg.text.normalize, ignore: compilePatterns(cfg.ignore.text), numbers: cfg.data !== "same" };
   const na = normalizeLines(a, opts);
   const nb = normalizeLines(b, opts);
   const ops = diffLines(na, nb);

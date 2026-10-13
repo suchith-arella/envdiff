@@ -1,12 +1,16 @@
 import path from "node:path";
-import { collectPage, finishAnimations, msSinceChange, pageFingerprint, readPerf, scrollStep } from "./inpage/collect.js";
+import { busyIndicator, collectPage, finishAnimations, msSinceChange, pageFingerprint, readPerf, scrollStep } from "./inpage/collect.js";
 import { instrumentPage } from "./instrument.js";
 import { sleep } from "./util/misc.js";
 
+/** A loading indicator still up this long after everything else went quiet never goes away. */
+const BUSY_GIVE_UP_MS = 6000;
+
 /**
  * Wait until the page stops changing: no network activity, DOM mutations,
- * scrolling, client-side navigation or long main-thread tasks for `quietMs`.
- * Bounded by `timeout`; returns whether it settled.
+ * scrolling, client-side navigation or long main-thread tasks for `quietMs`,
+ * and no loading indicator (a grid's "Loading…" overlay, a spinner) on
+ * screen. Bounded by `timeout`; returns whether it settled.
  * @param {import("playwright").Page} page
  * @param {import("./instrument.js").Instrumented} inst
  * @param {{ timeout?: number, quietMs?: number }} [opts]
@@ -15,6 +19,8 @@ export async function settle(page, inst, opts = {}) {
   const timeout = opts.timeout ?? 3000;
   const quietMs = opts.quietMs ?? 400;
   const deadline = Date.now() + timeout;
+  const busy = inst.busySelectors ?? [];
+  let busySince = 0;
   await page.waitForLoadState("load", { timeout: Math.max(1, timeout) }).catch(() => {});
   while (Date.now() < deadline) {
     let quietFor = 0;
@@ -25,7 +31,14 @@ export async function settle(page, inst, opts = {}) {
       await sleep(100);
       continue;
     }
-    if (quietFor >= quietMs && inst.networkQuiet(quietMs) && inst.navigationQuiet(quietMs)) return true;
+    if (quietFor >= quietMs && inst.networkQuiet(quietMs) && inst.navigationQuiet(quietMs)) {
+      const spinning = busy.length ? await page.evaluate(busyIndicator, busy).catch(() => "") : "";
+      if (!spinning) return true;
+      busySince ||= Date.now();
+      if (Date.now() - busySince > BUSY_GIVE_UP_MS) return true;
+    } else {
+      busySince = 0;
+    }
     await sleep(100);
   }
   return false;

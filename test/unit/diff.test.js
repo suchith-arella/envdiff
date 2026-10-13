@@ -90,12 +90,22 @@ test("normalizeLines removes volatile tokens", () => {
 });
 
 test("compareText reports only real changes", () => {
-  const cfg = resolveConfig({});
+  const cfg = resolveConfig({ data: "same" });
   const same = compareText(["Updated 10:42:01", "Hello"], ["Updated 11:00:59", "Hello"], cfg);
   assert.equal(same.removed + same.added, 0);
   const changed = compareText(["We ship to 40 countries."], ["We ship to 12 countries."], cfg);
   assert.equal(changed.removed, 1);
   assert.equal(changed.added, 1);
+});
+
+test("compareText treats numbers as data when the environments hold different data", () => {
+  const cfg = resolveConfig({});
+  assert.equal(cfg.data, "different");
+  const data = compareText(["Revenue $1,204,330", "Orders 60"], ["Revenue $998,120", "Orders 57"], cfg);
+  assert.equal(data.removed + data.added, 0);
+  const words = compareText(["Revenue $1,204,330"], ["Income $998,120"], cfg);
+  assert.equal(words.removed, 1);
+  assert.equal(words.added, 1);
 });
 
 test("suspiciousText flags broken renders new on the candidate only", () => {

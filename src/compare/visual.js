@@ -24,7 +24,9 @@ const MAX_PIXELS = 40_000_000;
  * @param {string} fileA
  * @param {string} fileB
  * @param {string | null} outFile Where to write the diff image (only if there is a difference).
- * @param {{ threshold?: number }} [opts]
+ * @param {{ threshold?: number, ignore?: Rect[] }} [opts]
+ *   `ignore`: areas not compared (grids and charts showing different data);
+ *   drawn hatched in the diff image.
  * @returns {VisualDiff}
  */
 export function diffImages(fileA, fileB, outFile, opts = {}) {
@@ -38,6 +40,11 @@ export function diffImages(fileA, fileB, outFile, opts = {}) {
 
   const A = padTo(a, width, height);
   const B = padTo(b, width, height);
+  const ignore = clipRects(opts.ignore ?? [], width, height);
+  // Make ignored areas identical, so they can't differ.
+  for (const r of ignore) {
+    for (let y = r.y; y < r.y + r.h; y++) A.copy(B, (y * width + r.x) * 4, (y * width + r.x) * 4, (y * width + r.x + r.w) * 4);
+  }
   const out = new PNG({ width, height });
   const n = pixelmatch(A, B, out.data, width, height, {
     threshold: opts.threshold ?? 0.1,
@@ -48,8 +55,39 @@ export function diffImages(fileA, fileB, outFile, opts = {}) {
   });
   if (n === 0) return base;
   const regions = clusterRegions(out.data, width, height);
+  for (const r of ignore) hatch(out.data, width, r);
   if (outFile) fs.writeFileSync(outFile, PNG.sync.write(out));
   return { ...base, ratio: n / (width * height), diffPixels: n, regions };
+}
+
+/** @typedef {{ x: number, y: number, w: number, h: number }} Rect */
+
+/** Rectangles cut to the image and rounded to whole pixels. @param {Rect[]} rects @param {number} width @param {number} height */
+function clipRects(rects, width, height) {
+  /** @type {Rect[]} */
+  const out = [];
+  for (const r of rects) {
+    const x = Math.max(0, Math.floor(r.x));
+    const y = Math.max(0, Math.floor(r.y));
+    const x2 = Math.min(width, Math.ceil(r.x + r.w));
+    const y2 = Math.min(height, Math.ceil(r.y + r.h));
+    if (x2 > x && y2 > y) out.push({ x, y, w: x2 - x, h: y2 - y });
+  }
+  return out;
+}
+
+/** Diagonal grey stripes: "not compared". @param {Buffer | Uint8Array} data @param {number} width @param {Rect} r */
+function hatch(data, width, r) {
+  for (let y = r.y; y < r.y + r.h; y++) {
+    for (let x = r.x; x < r.x + r.w; x++) {
+      if ((x + y) % 12 > 1) continue;
+      const i = (y * width + x) * 4;
+      data[i] = 150;
+      data[i + 1] = 160;
+      data[i + 2] = 175;
+      data[i + 3] = 255;
+    }
+  }
 }
 
 /**
@@ -58,7 +96,7 @@ export function diffImages(fileA, fileB, outFile, opts = {}) {
  * @param {number} height
  */
 function padTo(img, width, height) {
-  if (img.width === width && img.height === height) return img.data;
+  if (img.width === width && img.height === height) return Buffer.from(img.data);
   const out = Buffer.alloc(width * height * 4, 0);
   for (let y = 0; y < img.height; y++) {
     img.data.copy(out, y * width * 4, y * img.width * 4, (y + 1) * img.width * 4);

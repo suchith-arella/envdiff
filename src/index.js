@@ -14,13 +14,15 @@ import { createLogger } from "./util/log.js";
 
 export { run, resolveConfig, loadConfigFile, DEFAULT_CONFIG, ConfigError, VERSION };
 export { classifyTarget, applyUrlTemplate, branchSlug } from "./targets.js";
+export { totp } from "./login.js";
 
 /**
  * Resolve a partial config and run a comparison.
  * @param {Record<string, any>} config
- * @param {{ log?: ReturnType<typeof createLogger>, quiet?: boolean }} [opts]
+ * @param {{ log?: ReturnType<typeof createLogger>, quiet?: boolean, env?: NodeJS.ProcessEnv }} [opts]
+ *   `env`: where ENVDIFF_<ENV>_URL / _USERNAME / _PASSWORD are read from (default process.env).
  */
 export function compare(config, opts = {}) {
   const log = opts.log ?? createLogger({ level: opts.quiet ? "warn" : "info" });
-  return run(resolveConfig(config, {}, { warn: (m) => log.warn(m) }), { log });
+  return run(resolveConfig(config, {}, { warn: (m) => log.warn(m), env: opts.env }), { log });
 }

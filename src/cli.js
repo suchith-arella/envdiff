@@ -5,6 +5,7 @@ import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadConfigFile, resolveConfig, ConfigError } from "./config.js";
 import { classifyTarget } from "./targets.js";
+import { knownEnvironments } from "./environments.js";
 import { run, VERSION } from "./run.js";
 import { renderMarkdown } from "./report/index.js";
 import { createLogger, color, formatDuration } from "./util/log.js";
@@ -19,9 +20,11 @@ ${color.bold("Usage")}
   envdiff init [file]                      write a commented starter config
   envdiff login <url> [--save auth.json]   log in by hand (SSO/MFA) and save the session
 
-  baseline/candidate are URLs (https://uat.example.com, localhost:3000) or
-  branch names (main, feature/login). Branches need --url-template or a
-  branches.serve config. Prefix with url: or branch: to force either.
+  baseline/candidate are URLs (https://uat.example.com, localhost:3000),
+  environment names (prod, uat, dev) or branch names (main, feature/login).
+  An environment is named by ENVDIFF_<ENV>_URL or the config's environments.
+  Branches need --url-template or a branches.serve config. Prefix with url:,
+  env: or branch: to force one.
 
 ${color.bold("Common options")}
   -c, --config <file>          YAML/JSON/JS config (see examples/envdiff.config.yaml)
@@ -34,6 +37,13 @@ ${color.bold("Common options")}
       --viewports <list>       desktop,mobile,tablet or WIDTHxHEIGHT (default desktop)
       --fail-on <level>        critical | major | minor | never (default critical)
       --url-template <tpl>     Branch → URL, e.g. https://{branch}.preview.example.com
+
+${color.bold("Logging in")}
+      --user <name>                     Log in as this user: ENVDIFF_<ENV>_<NAME>_USERNAME / _PASSWORD.
+                                        Without it, ENVDIFF_<ENV>_USERNAME / _PASSWORD when set;
+                                        "none" doesn't log in. Per side: ENVDIFF_BASELINE_USERNAME, …
+                                        The login form is found and filled automatically; a one-time
+                                        code is generated from ENVDIFF_<ENV>[_<NAME>]_TOTP if asked for.
 
 ${color.bold("Access")}
       --header <"Name: value">          Header for both (repeatable). Same-origin requests only.
@@ -52,6 +62,8 @@ ${color.bold("Scope and noise")}
       --mask <selector>        Paint over before screenshots, e.g. .clock (repeatable)
       --ignore-text <regex>    Ignore matching text in comparisons (repeatable)
       --freeze-time <iso>      Freeze Date.now() in both, e.g. 2025-01-01T10:00:00Z
+      --same-data              Both environments hold the same data: compare numbers, grid
+                               cells and chart values too (by default only their format)
       --no-explore --no-visual --no-text --no-a11y --no-perf
 
 ${color.bold("Safety")}
@@ -80,6 +92,7 @@ ${color.bold("Examples")}
   envdiff https://uat.example.com https://dev.example.com
   envdiff https://www.example.com https://staging.example.com --viewports desktop,mobile --fail-on major
   envdiff main feature/checkout --url-template "https://{branch}--shop.netlify.app"
+  ENVDIFF_PROD_URL=https://www.example.com ENVDIFF_UAT_URL=https://uat.example.com envdiff prod uat --user admin
   envdiff -c envdiff.config.yaml
 `;
 
@@ -105,11 +118,13 @@ const OPTIONS = /** @type {const} */ ({
   "candidate-storage": { type: "string" },
   "baseline-label": { type: "string" },
   "candidate-label": { type: "string" },
+  user: { type: "string" },
   include: { type: "string", multiple: true },
   exclude: { type: "string", multiple: true },
   mask: { type: "string", multiple: true },
   "ignore-text": { type: "string", multiple: true },
   "freeze-time": { type: "string" },
+  "same-data": { type: "boolean" },
   "no-explore": { type: "boolean" },
   "no-visual": { type: "boolean" },
   "no-text": { type: "boolean" },
@@ -171,8 +186,14 @@ function num(v, name) {
   return n;
 }
 
-/** Build config overrides from parsed flags and environment variables. */
-export function overridesFrom(/** @type {any} */ v, /** @type {string[]} */ positionals, env = process.env) {
+/**
+ * Build config overrides from parsed flags and environment variables.
+ * @param {any} v
+ * @param {string[]} positionals
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {Set<string>} [environments] Environment names the positionals may refer to.
+ */
+export function overridesFrom(v, positionals, env = process.env, environments = knownEnvironments({}, env)) {
   /** @type {any} */
   const o = { baseline: {}, candidate: {}, crawl: {}, explore: {}, report: {}, browser: {}, visual: {}, ignore: {}, ai: {}, timeouts: {} };
   const [b, c] = positionals;
@@ -181,10 +202,12 @@ export function overridesFrom(/** @type {any} */ v, /** @type {string[]} */ posi
     ["candidate", c],
   ])) {
     if (!input) continue;
-    const t = classifyTarget(input);
+    const t = classifyTarget(input, environments);
     if (t.kind === "url") o[side].url = t.url;
+    else if (t.kind === "env") o[side].env = t.name;
     else o[side].ref = t.ref;
   }
+  if (v.user) o.user = v.user;
   const both = parseHeaders(...(v.header ?? []), env.ENVDIFF_HEADERS);
   const hb = { ...both, ...parseHeaders(...(v["baseline-header"] ?? []), env.ENVDIFF_BASELINE_HEADERS) };
   const hc = { ...both, ...parseHeaders(...(v["candidate-header"] ?? []), env.ENVDIFF_CANDIDATE_HEADERS) };
@@ -213,6 +236,7 @@ export function overridesFrom(/** @type {any} */ v, /** @type {string[]} */ posi
   if (v["url-template"]) o.branches = { urlTemplate: v["url-template"] };
   if (v.mask) o.visual.mask = v.mask;
   if (v["freeze-time"]) o.visual.freezeTime = v["freeze-time"];
+  if (v["same-data"]) o.data = "same";
   if (v["no-visual"]) o.visual.enabled = false;
   if (v["ignore-text"]) o.ignore.text = v["ignore-text"];
   if (v["no-text"]) o.text = { enabled: false };
@@ -242,8 +266,9 @@ function reconcileTargets(fileCfg, overrides) {
   for (const side of ["baseline", "candidate"]) {
     const o = overrides[side];
     if (!o || !fileCfg[side]) continue;
-    if (o.url) delete fileCfg[side].ref;
-    if (o.ref) delete fileCfg[side].url;
+    if (o.url || o.ref || o.env) {
+      for (const k of ["url", "ref", "env"]) if (!(k in o)) delete fileCfg[side][k];
+    }
   }
 }
 
@@ -277,7 +302,7 @@ export async function main(argv) {
     if (positionals.length > 2) throw new ConfigError(`Expected at most two arguments (baseline, candidate), got ${positionals.length}`);
 
     const fileCfg = v.config ? await loadConfigFile(v.config) : await autoConfig(log);
-    const overrides = overridesFrom(v, positionals);
+    const overrides = overridesFrom(v, positionals, process.env, knownEnvironments(fileCfg.environments));
     reconcileTargets(fileCfg, overrides);
     const cfg = resolveConfig(fileCfg, overrides, { warn: (m) => log.warn(m) });
 

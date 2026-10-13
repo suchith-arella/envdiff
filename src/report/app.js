@@ -90,7 +90,9 @@
     function env(lbl, e) {
       return '<div class="env"><div class="lbl">' + lbl + '</div><div class="name">' + esc(e.label) +
         (e.ref ? ' <span class="muted mono">' + esc(e.ref) + (e.sha ? " @ " + esc(e.sha.slice(0, 7)) : "") + "</span>" : "") +
-        '</div><a class="url" href="' + esc(e.url) + '" target="_blank" rel="noopener">' + esc(e.url) + "</a></div>";
+        '</div><a class="url" href="' + esc(e.url) + '" target="_blank" rel="noopener">' + esc(e.url) + "</a>" +
+        (e.login ? '<div class="muted small">signed in as ' + esc(e.login.user && e.login.user !== "default" ? e.login.user + (e.login.username ? " (" + e.login.username + ")" : "") : e.login.username || "the default user") + "</div>" : "") +
+        "</div>";
     }
     var head = document.getElementById("head");
     var aiCard = "";
@@ -264,7 +266,7 @@
     var q = state.pageQ.toLowerCase();
     var listHtml = DATA.pages.map(function (p, i) {
       if (q && p.key.toLowerCase().indexOf(q) < 0) return "";
-      return '<div class="pitem' + (i === idx ? " on" : "") + '" data-i="' + i + '"><span class="k" title="' + esc(p.key) + '">' + esc(p.key) + "</span>" +
+      return '<div class="pitem' + (i === idx ? " on" : "") + '" data-i="' + i + '"><span class="k" title="' + esc(p.key) + '">' + esc(p.key) + (p.redirectsTo ? ' <span class="muted">→ ' + esc(p.redirectsTo) + "</span>" : "") + "</span>" +
         (DATA.meta.viewports.length > 1 ? '<span class="vp">' + esc(p.viewport) + "</span>" : "") + badges(sevCounts(p.findings)) + "</div>";
     }).join("");
     app.innerHTML = tabs("pages") + '<div class="pages"><div class="plist"><input class="search" id="pq" type="search" placeholder="Filter pages…" value="' + esc(state.pageQ) + '">' + listHtml + '</div><div id="pdetail"></div></div>';
@@ -312,6 +314,11 @@
       (b.counts && c.counts ? fact("Page", countsLine(b.counts), countsLine(c.counts)) : "") +
       "</div></div>";
 
+    if (p.redirectsTo) {
+      html += '<div class="card"><div class="empty"><b>Opens ' + esc(p.redirectsTo) + '</b>Both environments go on to that page, so it is compared there.</div></div>';
+      box.innerHTML = html;
+      return;
+    }
     html += '<div class="card"><h3>Findings <span class="count">' + findings.length + "</span></h3>" +
       (findings.length ? '<table><tbody>' + findingRows(findings, true) + "</tbody></table>" : '<div class="empty"><b>No differences</b>This page matches.</div>') + "</div>";
 

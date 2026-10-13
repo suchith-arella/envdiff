@@ -21,6 +21,8 @@ import { createQueue, compilePatterns, matchesAny, mapLimit, shortHash, slugify,
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const VERSION = JSON.parse(fs.readFileSync(path.join(here, "..", "package.json"), "utf8")).version;
 
+const SIDES = /** @type {const} */ (["baseline", "candidate"]);
+
 /** Files this tool writes; only these are removed when a report directory is reused. */
 const OWN_FILES = ["index.html", "report.json", "summary.md", "junit.xml"];
 
@@ -76,12 +78,12 @@ export async function run(cfg, opts = {}) {
     // and start the other viewports from that state.
     /** @type {Record<string, { baseline: import("./session.js").EnvSession, candidate: import("./session.js").EnvSession }>} */
     const sessions = {};
-    /** @type {Record<string, any>} */
+    /** @type {Partial<Record<"baseline"|"candidate", import("./session.js").AuthState>>} */
     const authState = {};
     for (const [i, vp] of cfg.viewports.entries()) {
       /** @type {any} */
       const pair = {};
-      for (const side of /** @type {const} */ (["baseline", "candidate"])) {
+      for (const side of SIDES) {
         pair[side] = await createSession(browser, {
           side,
           label: targets[side].label,
@@ -89,17 +91,77 @@ export async function run(cfg, opts = {}) {
           viewport: vp,
           scope: scopes[side],
           tokens: tokens[side],
-          storageState: authState[side],
+          authState: authState[side],
         });
-        const auth = cfg[side].auth ?? cfg.auth;
+        const auth = cfg[side].auth;
         if (i === 0 && auth) {
-          log.info(`Logging in to ${targets[side].label}…`);
-          authState[side] = await authenticate(pair[side], auth, { outDir, log });
+          log.info(`Logging in to ${targets[side].label}${whoLogsIn(cfg[side].login)}…`);
+          authState[side] = await authenticate(pair[side], auth, { outDir, log, totpHint: cfg[side].login?.totpVar });
         }
       }
       sessions[vp.name] = pair;
     }
     const primary = sessions[cfg.viewports[0].name];
+    const loggedIn = !!(authState.baseline && authState.candidate);
+
+    // Once logged in, the login page is no page to compare: visiting it can
+    // end the session, and so can its "Log in" links.
+    /** @type {Set<string>} */
+    const loginKeys = new Set();
+    for (const side of SIDES) {
+      const st = authState[side];
+      if (!st) continue;
+      const keyOf = (/** @type {string | null | undefined} */ u) => (u ? scopes[side].keyOf(u, { ignoreQuery: cfg.crawl.ignoreQuery }) : null);
+      const landed = keyOf(st.landedUrl);
+      for (const k of [keyOf(st.formUrl), cfg[side].auth?.loginUrl ? keyOf(scopes[side].urlFor(/** @type {string} */ (cfg[side].auth?.loginUrl))) : null]) {
+        if (k && k !== landed) loginKeys.add(k);
+      }
+    }
+    if (loggedIn) cfg.explore.skip.text = [...cfg.explore.skip.text, "\\b(log ?in|sign ?in|login|signin)\\b"];
+
+    // A session that ends mid-run (expiry, a logout somewhere) shows the
+    // login form where the other environment shows the page: log in again.
+    /** @type {Map<import("./session.js").EnvSession, Promise<void>>} */
+    const relogging = new Map();
+    let relogins = 0;
+    /**
+     * @param {{ baseline: import("./session.js").EnvSession, candidate: import("./session.js").EnvSession }} pair
+     * @param {import("./capture.js").Snapshot[]} snaps
+     * @param {string} key
+     */
+    const reloginIfNeeded = async (pair, snaps, key) => {
+      let again = false;
+      for (const [i, side] of SIDES.entries()) {
+        if (snaps[i].dom?.loginForm && !snaps[1 - i].dom?.loginForm && (await relogin(pair[side], side, key))) again = true;
+      }
+      return again;
+    };
+    /**
+     * Log one session in again: one login at a time per session, a few per run.
+     * @param {import("./session.js").EnvSession} session
+     * @param {"baseline"|"candidate"} side
+     * @param {string} key Where it was noticed.
+     */
+    const relogin = async (session, side, key) => {
+      const auth = cfg[side].auth;
+      if (!auth || !authState[side]) return false;
+      let pending = relogging.get(session);
+      if (!pending) {
+        if (relogins >= 20) return false;
+        relogins++;
+        log.warn(`${targets[side].label} showed its login form on ${key}: logging in again`);
+        pending = authenticate(session, auth, { outDir, log, totpHint: cfg[side].login?.totpVar }).then(
+          () => {},
+          (e) => {
+            log.warn(/** @type {Error} */ (e).message);
+          },
+        );
+        relogging.set(session, pending);
+        pending.finally(() => relogging.delete(session));
+      }
+      await pending;
+      return true;
+    };
 
     await preflight(primary, startKey, log);
 
@@ -150,12 +212,14 @@ export async function run(cfg, opts = {}) {
     });
     /** Queue a page if the crawl rules accept it. */
     const offer = (/** @type {string} */ k, /** @type {number} */ depth, seed = false) => {
+      if (loginKeys.has(k)) return;
       if (crawl.enqueue(k, depth, seed)) queue.push({ key: k, depth });
     };
-    const seeds =
-      cfg.crawl.startPaths.length === 1 && cfg.crawl.startPaths[0] === "/"
-        ? [startKey]
-        : cfg.crawl.startPaths.map((p) => scopeB.keyOf(p.startsWith("http") ? p : scopeB.urlFor(p)) ?? p);
+    const defaultStart = cfg.crawl.startPaths.length === 1 && cfg.crawl.startPaths[0] === "/";
+    const seeds = defaultStart ? [startKey] : cfg.crawl.startPaths.map((p) => scopeB.keyOf(p.startsWith("http") ? p : scopeB.urlFor(p)) ?? p);
+    // Where the app lands after logging in is where its users start.
+    const landed = authState.baseline ? scopeB.keyOf(authState.baseline.landedUrl, { ignoreQuery: cfg.crawl.ignoreQuery }) : null;
+    if (defaultStart && landed && !seeds.includes(landed)) seeds.push(landed);
     for (const k of seeds) offer(k, 0, true);
     if (cfg.crawl.sitemap) for (const k of await sitemapKeys(primary.baseline, log)) offer(k, 1);
 
@@ -214,7 +278,11 @@ export async function run(cfg, opts = {}) {
           const diffRel = assetPath(`${slug}-diff.png`);
           // A diff left by the first look must not outlive a second look that has none.
           fs.rmSync(path.join(outDir, diffRel), { force: true });
-          const d = diffImages(path.join(outDir, b.screenshot), path.join(outDir, c.screenshot), path.join(outDir, diffRel), { threshold: cfg.visual.threshold });
+          const d = diffImages(path.join(outDir, b.screenshot), path.join(outDir, c.screenshot), path.join(outDir, diffRel), {
+            threshold: cfg.visual.threshold,
+            // Grids and charts drawing different data look different; their checks are structural.
+            ignore: cfg.data === "same" ? [] : [...(b.dom?.dataRects ?? []), ...(c.dom?.dataRects ?? [])],
+          });
           const visual = {
             ratio: Math.round(d.ratio * 10000) / 10000,
             size: { baseline: d.sizeA, candidate: d.sizeB },
@@ -241,6 +309,15 @@ export async function run(cfg, opts = {}) {
         const loaded = (/** @type {import("./capture.js").Snapshot} */ s) => !s.error && (s.status == null || s.status < 400);
 
         let [b, c] = await captureBoth();
+        if (loggedIn && !stopped() && (await reloginIfNeeded(s, [b, c], key))) [b, c] = await captureBoth();
+        // Both environments send this address on to the same other page (an
+        // app's "/" opening its dashboard): that page is compared under its
+        // own address, once, rather than twice.
+        if (b.finalKey && b.finalKey === c.finalKey && b.finalKey !== key && !b.error && !c.error) {
+          discovered.add(b.finalKey);
+          pages.push({ key, viewport: vp.name, depth, baseline: snapSummary(b), candidate: snapSummary(c), visual: null, text: null, interactions: [], skipped: [], findings: [], flaky: [], redirectsTo: b.finalKey });
+          continue;
+        }
         let judged = judge(b, c);
         /** @type {string[]} */
         let flaky = [];
@@ -307,6 +384,7 @@ export async function run(cfg, opts = {}) {
           const r = await explorePage({
             key,
             sessions: s,
+            relogin: loggedIn ? (side) => relogin(s[side], side, key) : undefined,
             doms: { baseline: b.dom, candidate: c.dom },
             cfg,
             add,
@@ -381,8 +459,8 @@ export async function run(cfg, opts = {}) {
       startedAt: new Date(started).toISOString(),
       finishedAt: new Date().toISOString(),
       durationMs: Date.now() - started,
-      baseline: { label: targets.baseline.label, url: targets.baseline.url, ref: targets.baseline.ref, sha: targets.baseline.sha },
-      candidate: { label: targets.candidate.label, url: targets.candidate.url, ref: targets.candidate.ref, sha: targets.candidate.sha },
+      baseline: { label: targets.baseline.label, url: targets.baseline.url, ref: targets.baseline.ref, sha: targets.baseline.sha, login: publicLogin(cfg.baseline.login) },
+      candidate: { label: targets.candidate.label, url: targets.candidate.url, ref: targets.candidate.ref, sha: targets.candidate.sha, login: publicLogin(cfg.candidate.login) },
       viewports: cfg.viewports.map((v) => `${v.name} ${v.width}×${v.height}`),
       browser: browserVersion,
       settings: {
@@ -432,6 +510,19 @@ export async function run(cfg, opts = {}) {
     log.annotate(f.severity === "critical" ? "error" : "warning", `envdiff ${f.severity}: ${f.page ?? f.journey ?? ""}`, f.title);
   }
   return { report, exitCode: failing.length ? 1 : 0 };
+}
+
+/** @param {import("./config.js").EnvConfig["login"]} login */
+function whoLogsIn(login) {
+  if (!login) return "";
+  const name = login.user && login.user !== "default" ? login.user : "";
+  if (name && login.username) return ` as ${name} (${login.username})`;
+  return name || login.username ? ` as ${name || login.username}` : "";
+}
+
+/** Who was logged in, for the report: never the password, and the username only masked. @param {import("./config.js").EnvConfig["login"]} login */
+function publicLogin(login) {
+  return login ? { user: login.user, username: login.username } : null;
 }
 
 /**

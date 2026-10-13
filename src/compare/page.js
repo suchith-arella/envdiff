@@ -1,5 +1,7 @@
 import { compareElements, compareForms, compareImages } from "./elements.js";
 import { compareText, suspiciousText } from "./text.js";
+import { compareGrids } from "./grids.js";
+import { compareCharts } from "./charts.js";
 import { normalizeRequestUrl } from "../urls.js";
 import { truncate } from "../util/misc.js";
 
@@ -102,6 +104,11 @@ export function comparePages(b, c, ctx) {
     (s) => s,
     { add, where },
   );
+
+  // ---- grids and charts -------------------------------------------------------
+  const sameData = cfg.data === "same";
+  compareGrids(/** @type {any} */ (domB).grids ?? [], /** @type {any} */ (domC).grids ?? [], { add, where, sameData });
+  compareCharts(/** @type {any} */ (domB).charts ?? [], /** @type {any} */ (domC).charts ?? [], { add, where, sameData });
 
   // ---- text -------------------------------------------------------------------
   if (cfg.text.enabled) {

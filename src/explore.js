@@ -1,12 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
-import { collectPage, finishAnimations } from "./inpage/collect.js";
+import { collectPage, finishAnimations, chartPoints, chartTooltip, viewportDataRects } from "./inpage/collect.js";
 import { instrumentPage } from "./instrument.js";
 import { loadPage, settle } from "./capture.js";
 import { annotateElements, matchElements, relocate, digitless } from "./match.js";
 import { compareLogs, failedRequests } from "./compare/page.js";
 import { normalizeLines, suspiciousText } from "./compare/text.js";
 import { diffImages } from "./compare/visual.js";
+import { pairByName } from "./compare/grids.js";
+import { tooltipShape } from "./compare/charts.js";
 import { describeEl, elRef, CHROME } from "./compare/elements.js";
 import { routePattern } from "./urls.js";
 import { DEFAULT_DENY_TEXT, DEFAULT_DENY_PATHS } from "./config.js";
@@ -45,7 +47,7 @@ import { shortHash, compilePatterns, matchesAny, truncate, sleep } from "./util/
  * @property {string} page
  * @property {string} viewport
  * @property {string[]} path Human labels of each step.
- * @property {"click"|"select"} action
+ * @property {"click"|"select"|"hover"} action
  * @property {string} [option] For selects, the option chosen.
  * @property {ReturnType<typeof elRef>} element
  * @property {string} baseline Summary of what happened.
@@ -55,6 +57,7 @@ import { shortHash, compilePatterns, matchesAny, truncate, sleep } from "./util/
  * @property {{ baseline?: string, candidate?: string, diff?: string }} screenshots
  * @property {number} [visualRatio]
  * @property {boolean} [flaky] It differed once but not when repeated.
+ * @property {string[]} [flakyFindings] What differed the first time.
  */
 
 /**
@@ -407,8 +410,11 @@ function multisetMinus(a, b) {
   return out;
 }
 
-/** A control's own state. @param {El} e */
-const stateOf = (e) => `${e.expanded ?? ""}:${e.checked ?? ""}:${/** @type {any} */ (e).selected ?? ""}:${e.value ?? ""}`;
+/** A control's own state: expanded, checked, selected, value, sort order, pressed. @param {El} e */
+const stateOf = (e) => {
+  const x = /** @type {any} */ (e);
+  return `${e.expanded ?? ""}:${e.checked ?? ""}:${x.selected ?? ""}:${e.value ?? ""}:${x.sort ?? ""}:${x.pressed ?? ""}`;
+};
 
 /**
  * A fingerprint of what the page shows: controls with their state, open
@@ -421,7 +427,9 @@ const stateOf = (e) => `${e.expanded ?? ""}:${e.checked ?? ""}:${/** @type {any}
 function signature(dom, cfg, exclude) {
   const controls = dom.actionables.map((/** @type {El} */ e) => (e.key === exclude ? /** @type {string} */ (e.key) : `${e.key}:${stateOf(e)}`)).join(",");
   const text = normalizeLines(dom.text, { normalize: true, ignore: compilePatterns(cfg.ignore.text) }).join("\n");
-  return shortHash(`${controls}|${dom.dialogs.join(",")}|${dom.styleSig ?? ""}|${text}`);
+  // Grids and charts aren't in the text; their own digests say when they change (sorted, paged, a series hidden).
+  const data = [...(dom.grids ?? []), ...(dom.charts ?? [])].map((/** @type {any} */ x) => x.digest).join(",");
+  return shortHash(`${controls}|${dom.dialogs.join(",")}|${dom.styleSig ?? ""}|${text}|${data}`);
 }
 
 /**
@@ -491,6 +499,7 @@ export function summarize(o, fromKey) {
  * @param {Set<string>} ctx.globalSeen Chrome controls already explored on another page.
  * @param {() => boolean} ctx.stopped True once the run should wrap up.
  * @param {number} [ctx.pageVisualRatio]
+ * @param {(side: "baseline"|"candidate") => Promise<boolean>} [ctx.relogin] Log a side in again whose session ended.
  * @param {import("./util/log.js").Logger} ctx.log
  * @returns {Promise<{ interactions: Interaction[], skipped: { element: string, reason: string }[], discovered: string[] }>}
  */
@@ -530,7 +539,9 @@ export async function explorePage(ctx) {
     if (pair.a.tag === "select" && option === undefined) continue;
     stack.push({ path: [{ id: stepId(pair.a, option), pair, option }] });
   }
-  if (!stack.length) return { interactions, skipped, discovered: [] };
+  const { pairs: chartPairs } = pairByName(ctx.doms.baseline.charts ?? [], ctx.doms.candidate.charts ?? []);
+  const hovers = cfg.explore.hover.charts > 0 ? chartPairs.slice(0, cfg.explore.hover.charts) : [];
+  if (!stack.length && !hovers.length) return { interactions, skipped, discovered: [] };
   stack.reverse(); // pop() takes document order
 
   const tabs = { baseline: new Tab(sessions.baseline, key), candidate: new Tab(sessions.candidate, key) };
@@ -540,13 +551,32 @@ export async function explorePage(ctx) {
       const item = /** @type {(typeof stack)[number]} */ (stack.pop());
       const last = item.path[item.path.length - 1];
       const prefix = item.path.slice(0, -1);
-      const labels = item.path.map((p) => describeEl(p.pair.a));
+      const labels = item.path.map((p) => (p.option !== undefined ? `"${truncate(p.option, 30)}" in ${describeEl(p.pair.a)}` : describeEl(p.pair.a)));
       const id = shortHash(`${key}|${where.viewport}|${item.path.map((p) => p.id).join(">")}`);
-      const attempt = async () => {
-        const [errB, errC] = await Promise.all([
+      const reach = () =>
+        Promise.all([
           tabs.baseline.reach(prefix.map((p) => ({ id: p.id, el: p.pair.a, option: p.option }))),
           tabs.candidate.reach(prefix.map((p) => ({ id: p.id, el: p.pair.b, option: p.option }))),
         ]);
+      /** The side showing its login form when the other isn't: its session ended. */
+      const lostSession = () => {
+        const b = !!tabs.baseline.inv?.loginForm;
+        const c = !!tabs.candidate.inv?.loginForm;
+        return b === c ? null : b ? /** @type {const} */ ("baseline") : /** @type {const} */ ("candidate");
+      };
+      let reloggedIn = false;
+      /** Log the side back in once and start over from a fresh load. */
+      const recover = async () => {
+        const side = ctx.relogin && !reloggedIn ? lostSession() : null;
+        if (!side || !(await /** @type {NonNullable<typeof ctx.relogin>} */ (ctx.relogin)(side))) return false;
+        reloggedIn = true;
+        tabs.baseline.fresh = tabs.candidate.fresh = false;
+        return true;
+      };
+      /** @returns {Promise<any>} */
+      const attempt = async () => {
+        let [errB, errC] = await reach();
+        if (await recover()) [errB, errC] = await reach();
         if (errB) return { errB };
         // A page that changes by itself on either side changes the rules for
         // both, or one side's DOM change would count and the other's wouldn't.
@@ -555,13 +585,15 @@ export async function explorePage(ctx) {
           tabs.baseline.act(last.pair.a, last.option),
           errC ? Promise.resolve(failedOutcome(errC, tabs.candidate)) : tabs.candidate.act(last.pair.b, last.option),
         ]);
+        // A session that ended during the action: log back in and do it again.
+        if (await recover()) return attempt();
         // The candidate seems to have done less: give it a second, longer look
         // before calling it broken (it may just be slower).
         if (ob.ok && oc.ok && ((ob.effect && !oc.effect) || (ob.domChanged && !oc.domChanged) || (ob.navigated && !oc.navigated))) {
           await tabs.candidate.recheck(oc);
         }
         // Screenshots of the after-state, both sides, while the tabs are still there.
-        const shots = await captureShots(tabs, ctx, id, ob, oc, last.pair);
+        const { shots, ignore } = await captureShots(tabs, ctx, id, ob, oc, last.pair);
         /** @type {any[]} */
         const found = [];
         const interaction = compareOutcomes(ob, oc, {
@@ -573,6 +605,7 @@ export async function explorePage(ctx) {
           option: last.option,
           add: (/** @type {any} */ f) => (found.push(f), f),
           shots,
+          ignore,
           outDir: ctx.outDir,
           pageVisualRatio: ctx.pageVisualRatio ?? 0,
           cfg,
@@ -595,7 +628,9 @@ export async function explorePage(ctx) {
           const identity = (/** @type {any} */ f) => `${f.type}|${f.fp ?? ""}`;
           const firstIds = new Set(first.found.map(identity));
           const againIds = new Set(again.found.map(identity));
-          again.interaction.flaky = first.found.some((f) => !againIds.has(identity(f)));
+          const gone = first.found.filter((f) => !againIds.has(identity(f)));
+          again.interaction.flaky = gone.length > 0;
+          if (gone.length) again.interaction.flakyFindings = gone.map((f) => truncate(f.title, 200));
           again.found = again.found.filter((f) => firstIds.has(identity(f)));
           for (const k of /** @type {const} */ (["baseline", "candidate", "diff"])) {
             const rel = first.interaction.screenshots[k];
@@ -619,10 +654,20 @@ export async function explorePage(ctx) {
         [tabs.candidate, oc],
       ])) {
         if (!o.ok || o.navigated) tab.fresh = false;
-        else if (o.effect || o.domChanged) tab.statePath.push(last.id);
+        // A new option chosen in a select changes the page's state even when
+        // nothing else shows it (a filter waiting for "Apply").
+        else if (o.effect || o.domChanged || last.option !== undefined) tab.statePath.push(last.id);
         if (o.navigated && o.toKey && o.toKey !== key) discovered.add(o.toKey);
       }
       log.debug(`    ${interaction.verdict === "same" ? "=" : "≠"} ${labels.join(" → ")}: ${interaction.baseline} | ${interaction.candidate}`);
+
+      // A filter changed with nothing to show for it yet waits for its
+      // "Apply": press it next, with the filter set, as a person would.
+      const settingOnly = (/** @type {Outcome} */ o) => o.ok && !o.navigated && !o.domChanged && !o.dialogs.length && !o.popups.length;
+      if ((last.option !== undefined || last.pair.a.kind === "toggle") && item.path.length < Math.max(2, cfg.explore.depth) && settingOnly(ob) && settingOnly(oc)) {
+        const apply = applyFor(last.pair, pairs, policy);
+        if (apply && !item.path.some((p) => p.pair === apply)) stack.push({ path: [...item.path, { id: stepId(apply.a), pair: apply }] });
+      }
 
       // Explore what this action revealed (menus, dialogs), depth permitting.
       if (item.path.length < cfg.explore.depth && ob.ok && oc.ok && !ob.navigated && !oc.navigated && ob.newControls.length) {
@@ -634,14 +679,155 @@ export async function explorePage(ctx) {
         }
       }
     }
+    for (const [cb, cc] of hovers) {
+      if (ctx.stopped()) break;
+      interactions.push(...(await hoverChart(tabs, cb, cc, { ...ctx, where })));
+    }
   } finally {
     await Promise.all([tabs.baseline.close(), tabs.candidate.close()]);
   }
   return { interactions, skipped, discovered: [...discovered] };
 }
 
+/**
+ * Point at a few points of a chart in both environments and compare the
+ * tooltips: one that no longer shows, or reads differently once the data is
+ * taken out ("Revenue: $12,400" against "Revenue: 12400").
+ * @param {{ baseline: Tab, candidate: Tab }} tabs
+ * @param {any} cb The chart on the baseline (from the page inventory).
+ * @param {any} cc The same chart on the candidate.
+ * @param {Parameters<typeof explorePage>[0] & { where: { page: string, viewport: string } }} ctx
+ * @returns {Promise<Interaction[]>}
+ */
+async function hoverChart(tabs, cb, cc, ctx) {
+  const { cfg, key, where } = ctx;
+  const [errB, errC] = await Promise.all([tabs.baseline.reach([]), tabs.candidate.reach([])]);
+  if (errB || errC) return [];
+  // The inventory from this load: the chart's position among the page's charts may have moved.
+  const find = (/** @type {Tab} */ t, /** @type {any} */ ch) => (t.inv?.charts ?? []).find((/** @type {any} */ x) => x.name === ch.name) ?? ch;
+  const chB = find(tabs.baseline, cb);
+  const chC = find(tabs.candidate, cc);
+  const count = cfg.explore.hover.points;
+  const [ptsB, ptsC] = await Promise.all([
+    /** @type {import("playwright").Page} */ (tabs.baseline.page).evaluate(chartPoints, { domIndex: chB.domIndex, count }).catch(() => []),
+    /** @type {import("playwright").Page} */ (tabs.candidate.page).evaluate(chartPoints, { domIndex: chC.domIndex, count }).catch(() => []),
+  ]);
+  /** @param {Tab} t @param {any} ch @param {{ x: number, y: number }} p */
+  const hover = async (t, ch, p) => {
+    const page = /** @type {import("playwright").Page} */ (t.page);
+    await page.mouse.move(p.x, p.y, { steps: 6 }).catch(() => {});
+    // Tooltips fade in; give it the time a person would.
+    await page.waitForTimeout(450);
+    return /** @type {string} */ (await page.evaluate(chartTooltip, { domIndex: ch.domIndex }).catch(() => ""));
+  };
+  const away = () => Promise.all([tabs.baseline, tabs.candidate].map((t) => t.page?.mouse.move(0, 0).catch(() => {})));
+  // The x-axis label is data too (dates, regions): take it out before comparing.
+  const shape = (/** @type {string} */ text, /** @type {string} */ label) =>
+    tooltipShape(label && label.length > 1 ? text.split(label).join("‹x›") : text).replace(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/gi, "‹month›");
+
+  /** @type {{ label: string, b: string, c: string }[]} */
+  const seen = [];
+  for (let i = 0; i < Math.min(ptsB.length, ptsC.length); i++) {
+    let [tb, tc] = await Promise.all([hover(tabs.baseline, chB, ptsB[i]), hover(tabs.candidate, chC, ptsC[i])]);
+    if (tb && (!tc || shape(tb, ptsB[i].label) !== shape(tc, ptsC[i].label)) && cfg.stabilize.confirm) {
+      // Once more, in case a tooltip was still fading in.
+      await away();
+      await sleep(300);
+      [tb, tc] = await Promise.all([hover(tabs.baseline, chB, ptsB[i]), hover(tabs.candidate, chC, ptsC[i])]);
+    }
+    seen.push({ label: ptsB[i].label, b: tb, c: tc });
+    await away();
+  }
+  if (!seen.length) return [];
+
+  const label = `"${cb.name}" chart`;
+  const id = shortHash(`${key}|${where.viewport}|hover|${cb.name}`);
+  /** @type {Interaction} */
+  const interaction = {
+    id,
+    page: key,
+    viewport: where.viewport,
+    path: [`hover the ${label}`],
+    action: "hover",
+    element: { role: "chart", name: cb.name, landmark: "", cssPath: `.highcharts-container >> nth=${cb.domIndex}` },
+    baseline: seen.map((x) => (x.b ? `"${truncate(x.b, 60)}"` : "no tooltip")).join("; "),
+    candidate: seen.map((x) => (x.c ? `"${truncate(x.c, 60)}"` : "no tooltip")).join("; "),
+    verdict: "same",
+    findings: [],
+    screenshots: {},
+  };
+  const record = (/** @type {any} */ f) => {
+    const r = ctx.add({ ...where, interaction: id, element: interaction.element, category: "interaction", ...f, fp: `${id}|${f.fp}` });
+    if (r) interaction.findings.push(r.id);
+  };
+  const lost = seen.filter((x) => x.b && !x.c);
+  const shapesB = new Set(seen.filter((x) => x.b).map((x) => shape(x.b, x.label)));
+  const differing = seen.filter((x, i) => x.b && x.c && !shapesB.has(shape(x.c, ptsC[i]?.label ?? "")));
+  if (lost.length === seen.filter((x) => x.b).length && lost.length) {
+    record({
+      severity: "major",
+      type: "chart.tooltip-missing",
+      title: `Hovering the ${label} shows no tooltip on candidate (baseline: "${truncate(lost[0].b, 60)}")`,
+      baseline: lost[0].b,
+      fp: "tooltip-missing",
+    });
+  } else if (differing.length && differing.length === seen.filter((x) => x.b && x.c).length) {
+    record({
+      severity: "minor",
+      type: "chart.tooltip",
+      title: `The ${label}'s tooltip reads differently on candidate: "${truncate(differing[0].c, 60)}" (baseline: "${truncate(differing[0].b, 60)}")`,
+      baseline: differing.map((x) => x.b),
+      candidate: differing.map((x) => x.c),
+      fp: "tooltip",
+    });
+  } else if (!seen.some((x) => x.b) && seen.some((x) => x.c)) {
+    record({ severity: "info", type: "chart.tooltip-new", title: `Hovering the ${label} now shows a tooltip on candidate`, fp: "tooltip-new" });
+  }
+  if (interaction.findings.length) {
+    interaction.verdict = "different";
+    // Show it: hover the first differing point again and photograph the chart on both sides.
+    const i = seen.indexOf(lost[0] ?? differing[0]);
+    if (i >= 0) {
+      await Promise.all([hover(tabs.baseline, chB, ptsB[i]), hover(tabs.candidate, chC, ptsC[i])]);
+      await Promise.all(
+        /** @type {const} */ (["baseline", "candidate"]).map(async (side) => {
+          const t = tabs[side];
+          const ch = side === "baseline" ? chB : chC;
+          const rel = ctx.assetPath(`ix-${id}-${side}.png`);
+          try {
+            await /** @type {import("playwright").Page} */ (t.page).locator(".highcharts-container").nth(ch.domIndex).screenshot({ path: path.join(ctx.outDir, rel), animations: "allow", timeout: 5000 });
+            interaction.screenshots[side] = rel;
+          } catch {
+            // the chart went away
+          }
+        }),
+      );
+      await away();
+    }
+  }
+  return [interaction];
+}
+
 /** @param {El} e @param {string} [option] */
 const stepId = (e, option) => shortHash(`${e.key}|${option ?? ""}`, 8);
+
+const APPLY = /^(apply( filters?)?|go|search|filter|update|run( report)?|refresh|show( results)?|view( report)?|load|generate( report)?|submit|ok)$/i;
+
+/**
+ * The "Apply" button that goes with a filter control: an apply-like button in
+ * the same part of the page (landmark and section heading), safe to click.
+ * @param {Step} filter
+ * @param {Step[]} pairs Every control on the page, paired across environments.
+ * @param {ReturnType<typeof createPolicy>} policy
+ */
+function applyFor(filter, pairs, policy) {
+  const near = pairs.filter(
+    (p) => p !== filter && p.a.kind === "button" && APPLY.test(p.a.name.trim()) && p.a.landmark === filter.a.landmark && p.a.heading === filter.a.heading && !policy.skipReason(p.a) && !policy.skipReason(p.b),
+  );
+  // The closest one below or beside the filter.
+  const dist = (/** @type {Step} */ p) => Math.abs(p.a.rect.y - filter.a.rect.y) * 2 + Math.abs(p.a.rect.x - filter.a.rect.x);
+  return near.sort((x, y) => dist(x) - dist(y))[0] ?? null;
+}
 
 /** An option that exists on both sides and isn't already selected. @param {El} a @param {El} b */
 function optionFor(a, b) {
@@ -683,7 +869,9 @@ function failedOutcome(error, tab) {
  * @param {Step} step The control that was acted on, on each side.
  */
 async function captureShots(tabs, ctx, id, ob, oc, step) {
-  if (!ob.effect && !oc.effect && ob.ok === oc.ok) return {};
+  /** @type {{ x: number, y: number, w: number, h: number }[]} Grids and charts in the shots, by position. */
+  const ignore = [];
+  if (!ob.effect && !oc.effect && ob.ok === oc.ok) return { shots: {}, ignore };
   // Both opened a dialog: compare the dialogs. The page behind them may sit
   // at a different scroll position, which says nothing about the dialog.
   const dialogs = ob.opened.length > 0 && oc.opened.length > 0;
@@ -725,15 +913,21 @@ async function captureShots(tabs, ctx, id, ob, oc, step) {
       };
       try {
         const dialog = page.locator("dialog[open],[role=dialog],[role=alertdialog],[aria-modal=true]").filter({ visible: true }).last();
-        if (dialogs && (await dialog.count())) await dialog.screenshot(options);
-        else await page.screenshot(options);
+        if (dialogs && (await dialog.count())) {
+          const box = await dialog.boundingBox();
+          await dialog.screenshot(options);
+          if (box) ignore.push(...(await page.evaluate(viewportDataRects, { x: box.x, y: box.y }).catch(() => [])));
+        } else {
+          await page.screenshot(options);
+          ignore.push(...(await page.evaluate(viewportDataRects, undefined).catch(() => [])));
+        }
         shots[side] = rel;
       } catch {
         // page navigated away mid-shot; leave it out
       }
     }),
   );
-  return shots;
+  return { shots, ignore };
 }
 
 /**
@@ -749,6 +943,7 @@ async function captureShots(tabs, ctx, id, ob, oc, step) {
  * @param {string} [ctx.option]
  * @param {(f: any) => any} ctx.add
  * @param {{ baseline?: string, candidate?: string }} ctx.shots
+ * @param {{ x: number, y: number, w: number, h: number }[]} [ctx.ignore] Where grids and charts are in the shots.
  * @param {string} ctx.outDir
  * @param {number} ctx.pageVisualRatio
  * @param {import("./config.js").Config} ctx.cfg
@@ -757,7 +952,10 @@ async function captureShots(tabs, ctx, id, ob, oc, step) {
 export function compareOutcomes(b, c, ctx) {
   const { add, key } = ctx;
   const el = ctx.step.a;
-  const what = `${ctx.option !== undefined ? `choosing "${truncate(ctx.option, 30)}" in` : "clicking"} ${ctx.labels.length > 1 ? ctx.labels.join(" → ") : describeEl(el)}`;
+  const what =
+    ctx.labels.length > 1
+      ? `using ${ctx.labels.join(" → ")}`
+      : `${ctx.option !== undefined ? `choosing "${truncate(ctx.option, 30)}" in` : "clicking"} ${describeEl(el)}`;
   const where = { ...ctx.where, interaction: ctx.id, element: elRef(el) };
   /** @type {string[]} */
   const ids = [];
@@ -831,7 +1029,10 @@ export function compareOutcomes(b, c, ctx) {
     try {
       const diffRel = ctx.shots.baseline.replace(/-baseline\.png$/, "-diff.png");
       const base = ctx.outDir;
-      const d = diffImages(path.join(base, ctx.shots.baseline), path.join(base, ctx.shots.candidate), path.join(base, diffRel), { threshold: ctx.cfg.visual.threshold });
+      const d = diffImages(path.join(base, ctx.shots.baseline), path.join(base, ctx.shots.candidate), path.join(base, diffRel), {
+        threshold: ctx.cfg.visual.threshold,
+        ignore: ctx.cfg.data === "same" ? [] : ctx.ignore,
+      });
       interaction.visualRatio = Math.round(d.ratio * 10000) / 10000;
       if (d.diffPixels) interaction.screenshots.diff = diffRel;
       if (d.ratio > Math.max(0.03, ctx.pageVisualRatio + 0.05)) {

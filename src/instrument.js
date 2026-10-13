@@ -47,6 +47,8 @@ export async function installGuard(context, cfg, env) {
     const method = request.method();
     if (method === "GET" || method === "HEAD" || method === "OPTIONS" || state.allowAll || cfg.safety.allowMutations) return proceed();
     if (matchesAny(allow, url)) return proceed();
+    // Bot-protection sensors post to generated paths; they write no app data.
+    if (cfg.safety.allowBotSensors && isOpaqueUrl(url)) return proceed();
     let body = null;
     try {
       body = request.postData();
@@ -311,6 +313,8 @@ export function instrumentPage(page, { scope, tokens, guard, cfg }) {
 
   return {
     log,
+    /** Loading indicators settle() waits out (stabilize.busySelectors). */
+    busySelectors: /** @type {string[]} */ (cfg.stabilize.busySelectors ?? []),
     /** Positions in each log, to slice out what one action caused. */
     mark() {
       return /** @type {Record<keyof PageLog, number>} */ (
