@@ -66,8 +66,12 @@ test("a script holds journeys: headings or 'Journey:' lines, numbered or bullete
     { name: "B", steps: ["Click Apply"] },
   ]);
   assert.deepEqual(parseJourneyScript("Go to Orders; Don't click Delete", { name: "Smoke" }), [{ name: "Smoke", steps: ["Go to Orders", "Don't click Delete"] }]);
-  // In a Markdown document with lists, paragraphs are prose, not steps.
-  assert.deepEqual(parseJourneyScript("# Our journeys\nRun these nightly.\n\n## Orders\nThe orders page.\n1. Go to Orders\n2. Click Apply"), [{ name: "Orders", steps: ["Go to Orders", "Click Apply"] }]);
+  // In a Markdown document with lists, paragraphs are prose, not steps; a
+  // line of steps separated by semicolons still counts.
+  assert.deepEqual(parseJourneyScript("# Our journeys\nRun these nightly.\n\n## Orders\nThe orders page.\n1. Go to Orders\n2. Click Apply\nJourney: Sort; Go to Orders; Sort by Amount"), [
+    { name: "Orders", steps: ["Go to Orders", "Click Apply"] },
+    { name: "Sort", steps: ["Go to Orders", "Sort by Amount"] },
+  ]);
 });
 
 test("journeys from the command line and from files join the config's", () => {

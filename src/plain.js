@@ -40,14 +40,15 @@
  */
 export function parseJourneyScript(text, opts = {}) {
   const lines = splitLines(String(text ?? ""));
-  // In a document with numbered or bulleted steps, other lines are prose.
+  // In a document with numbered or bulleted steps, other lines are prose —
+  // except steps given on one line separated by semicolons.
   const LIST = /^(?:step\s*\d+\s*[:.)\-–]|\d+\s*[.)\-–:]|[-*•])\s+/i;
-  const listed = lines.some((l) => LIST.test(l.trim()));
+  const listed = lines.some((l) => LIST.test(l.text.trim()));
   /** @type {{ name: string, steps: string[] }[]} */
   const journeys = [];
   /** @type {{ name: string, steps: string[] } | null} */
   let current = null;
-  for (const raw of lines) {
+  for (const { text: raw, joined } of lines) {
     const line = raw.trim();
     if (!line || /^(\/\/|<!--)/.test(line)) continue;
     const heading = /^(?:#{1,6}\s*|(?:journey|scenario|flow|test|case)\s*\d*\s*[:\-–]\s*)(.*)$/i.exec(line);
@@ -56,7 +57,7 @@ export function parseJourneyScript(text, opts = {}) {
       journeys.push(current);
       continue;
     }
-    if (listed && !LIST.test(line)) continue;
+    if (listed && !joined && !LIST.test(line)) continue;
     const step = line
       .replace(/^(?:step\s*\d+\s*[:.)\-–]?|\d+\s*[.)\-–:]|[-*•]|>\s)\s*/i, "")
       .replace(/\s*[;.]$/, "")
@@ -74,10 +75,16 @@ export function parseJourneyScript(text, opts = {}) {
 /**
  * Lines of a script; each line is split again at semicolons outside quotes
  * ("Journey: Smoke; Go to Orders; Click Apply", as a one-line workflow input).
+ * `joined`: part of a one-line journey ("Journey: …; step; step").
  * @param {string} text
+ * @returns {{ text: string, joined: boolean }[]}
  */
 function splitLines(text) {
-  return text.split(/\r?\n/).flatMap(splitSemicolons);
+  return text.split(/\r?\n/).flatMap((line) => {
+    const parts = splitSemicolons(line);
+    const journey = parts.length > 1 && /^\s*(?:journey|scenario|flow|test|case)\s*\d*\s*[:\-–]/i.test(parts[0]);
+    return parts.map((p) => ({ text: p, joined: journey }));
+  });
 }
 
 /** @param {string} text */
