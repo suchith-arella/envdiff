@@ -52,7 +52,9 @@ export class Scope {
     }
     p = trimTrailingSlash(p) || "/";
     const q = opts.ignoreQuery ? "" : normalizeQuery(u.searchParams);
-    const hash = /^#!?\//.test(u.hash) ? u.hash : "";
+    // A route in the hash is a page of a hash-routed app; the empty route
+    // ("#/") is the page the address shows without one.
+    const hash = /^#!?\/./.test(u.hash) ? u.hash : "";
     return p + (q ? `?${q}` : "") + hash;
   }
 

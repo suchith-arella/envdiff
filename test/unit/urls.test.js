@@ -9,6 +9,8 @@ test("keyOf normalizes queries, trailing slashes and hashes", () => {
   assert.equal(s.keyOf("https://dev.example.com/p?b=2&a=1&utm_source=x"), "/p?a=1&b=2");
   assert.equal(s.keyOf("https://dev.example.com/p#section"), "/p");
   assert.equal(s.keyOf("https://dev.example.com/app#/settings"), "/app#/settings");
+  assert.equal(s.keyOf("https://dev.example.com/#/"), "/", "the empty route of a hash-routed app is its start page");
+  assert.equal(s.keyOf("https://dev.example.com/#!/"), "/");
   assert.equal(s.keyOf("https://other.example.com/p"), null);
   assert.equal(s.keyOf("mailto:x@y.z"), null);
   assert.equal(s.keyOf("/relative/path", {}), "/relative/path");
