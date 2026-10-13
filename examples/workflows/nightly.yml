@@ -36,6 +36,9 @@ jobs:
           candidate: uat
           journey-file: qa/journeys.md # see examples/journeys.md
           ai: copilot
+          # Copilot as one particular user instead of this workflow: a fine-grained
+          # personal access token with the "Copilot Requests" permission.
+          github-token: ${{ secrets.COPILOT_GITHUB_TOKEN || github.token }}
           max-pages: "60"
           viewports: desktop,mobile
           click-depth: "2"

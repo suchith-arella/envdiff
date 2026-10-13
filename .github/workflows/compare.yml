@@ -11,15 +11,20 @@
 #     ENVDIFF_<ENV>[_<USER>]_TOTP      authenticator secret, if the login asks for a one-time code
 #     ENVDIFF_HEADERS / ENVDIFF_BASELINE_HEADERS / ENVDIFF_CANDIDATE_HEADERS   "Name: value" lines
 #     ANTHROPIC_API_KEY                for AI with Claude (not needed for Copilot)
+#     COPILOT_GITHUB_TOKEN             optional: Copilot as one particular user, on their
+#                                      Copilot seat — a fine-grained personal access token
+#                                      with the "Copilot Requests" permission
 #
 # "users" runs one comparison per user, in parallel: "default, admin" logs in
 # as ENVDIFF_<ENV>_USERNAME in one run and ENVDIFF_<ENV>_ADMIN_USERNAME in
 # another. Each run uploads its own report.
 #
-# AI with "copilot" uses GitHub Copilot as this workflow's GitHub user, with
-# no other secret: the job grants `copilot-requests: write`. For an
-# organization's repository, an owner must allow "Copilot CLI billed to the
-# organization" in the Copilot policies.
+# AI with "copilot" uses GitHub Copilot with this workflow's own token and no
+# other secret: the job grants `copilot-requests: write`. Usage is billed to
+# the repository owner's Copilot seat, or for an organization's repository to
+# the organization, once an owner allows "Copilot CLI billed to the
+# organization" in the Copilot policies. With a COPILOT_GITHUB_TOKEN secret,
+# Copilot runs as the user who made that token instead.
 name: Compare environments
 
 on:
@@ -147,4 +152,5 @@ jobs:
           fail-on: ${{ inputs.fail_on }}
           ai: ${{ inputs.ai == 'off' && 'false' || inputs.ai }}
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github-token: ${{ secrets.COPILOT_GITHUB_TOKEN || github.token }}
           artifact-name: envdiff-report-${{ inputs.baseline }}-vs-${{ inputs.candidate }}-${{ matrix.user.name }}

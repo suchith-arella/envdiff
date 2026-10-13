@@ -399,7 +399,7 @@ and works out journey steps envdiff can't read on its own. Two providers:
 
 | `--ai-provider` | Uses | Needs |
 |---|---|---|
-| `copilot` | **GitHub Copilot**, as the signed-in GitHub user | In GitHub Actions: `permissions: copilot-requests: write` and the action's `ai: copilot` — the workflow's own token is enough (organizations: allow "Copilot CLI billed to the organization" in the Copilot policies). Locally: `copilot login` or `GH_TOKEN`, and `npm install @github/copilot-sdk` |
+| `copilot` | **GitHub Copilot**, as the signed-in GitHub user | In GitHub Actions: `permissions: copilot-requests: write` and the action's `ai: copilot` — the workflow's own token is enough (organizations: allow "Copilot CLI billed to the organization" in the Copilot policies). To use one particular person's Copilot, pass their fine-grained personal access token with the "Copilot Requests" permission as `github-token`. Locally: `copilot login` or `GH_TOKEN`, and `npm install @github/copilot-sdk` |
 | `anthropic` | **Claude** (`claude-opus-5-5`) through the Anthropic API | `ANTHROPIC_API_KEY` |
 
 `--ai` alone picks Anthropic when its key is set, otherwise Copilot; `--ai-model`

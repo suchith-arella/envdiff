@@ -64,7 +64,7 @@ inputs:
     description: Anthropic API key, for ai "anthropic". Pass a secret.
     default: ""
   github-token:
-    description: 'Token for GitHub Copilot when ai is "copilot". The workflow''s own token works when the job has `permissions: copilot-requests: write`.'
+    description: 'Token for GitHub Copilot when ai is "copilot". The workflow''s own token (the default) works when the job has `permissions: copilot-requests: write`; a fine-grained personal access token with the "Copilot Requests" permission runs Copilot as that user, on their Copilot seat.'
     default: ${{ github.token }}
   args:
     description: 'Extra command-line arguments for envdiff (see envdiff --help). Quote values that contain spaces, e.g. --ignore-text "Visitors online".'

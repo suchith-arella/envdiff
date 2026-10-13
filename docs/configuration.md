@@ -361,7 +361,7 @@ Any step can also take `label:` (shown in the report) and `timeout:` (ms).
 | Key | Default | |
 |---|---|---|
 | `enabled` | `false` | `--ai`. Triage of findings, and help with journey steps. Sends screenshots and findings to the provider. |
-| `provider` | `auto` | `anthropic` (Claude; `ANTHROPIC_API_KEY`), `copilot` (GitHub Copilot as the signed-in GitHub user: `COPILOT_GITHUB_TOKEN`, `GH_TOKEN` or `GITHUB_TOKEN` — in Actions the job needs `permissions: copilot-requests: write` — or a `copilot login` session; needs `npm install @github/copilot-sdk`), or `auto`: Anthropic when its key is set, otherwise Copilot. `--ai-provider`. |
+| `provider` | `auto` | `anthropic` (Claude; `ANTHROPIC_API_KEY`), `copilot` (GitHub Copilot as the signed-in GitHub user: `COPILOT_GITHUB_TOKEN`, `GH_TOKEN` or `GITHUB_TOKEN` — in Actions the job needs `permissions: copilot-requests: write`; a fine-grained personal access token with the "Copilot Requests" permission uses that person's Copilot — or a `copilot login` session; needs `npm install @github/copilot-sdk`), or `auto`: Anthropic when its key is set, otherwise Copilot. `--ai-provider`. |
 | `model` | provider's | `claude-opus-5-5` for Anthropic; Copilot's automatic choice (`auto`) for Copilot, or any model your Copilot plan offers. |
 | `effort` | `medium` | `low`, `medium`, `high`, `xhigh`, `max`. |
 | `maxItems` | `25` | Pages/journeys triaged, worst first. |
