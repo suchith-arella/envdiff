@@ -46,7 +46,7 @@ inputs:
     description: Anthropic API key, required when ai is "true". Pass a secret.
     default: ""
   args:
-    description: Extra command-line arguments for envdiff (see envdiff --help).
+    description: 'Extra command-line arguments for envdiff (see envdiff --help). Quote values that contain spaces, e.g. --ignore-text "Visitors online".'
     default: ""
   report-dir:
     description: Where to write the report, relative to the workspace.
@@ -150,8 +150,14 @@ runs:
         [ -n "$INPUT_VIEWPORTS" ] && args+=( --viewports "$INPUT_VIEWPORTS" )
         [ -n "$INPUT_URL_TEMPLATE" ] && args+=( --url-template "$INPUT_URL_TEMPLATE" )
         [ "$INPUT_AI" = "true" ] && args+=( --ai )
-        # Extra arguments are word-split on purpose (no eval: nothing in them executes).
-        read -r -a extra <<< "$INPUT_ARGS"
+        # Extra arguments are split the way a shell would (quotes group words),
+        # by a parser that expands and runs nothing: no eval.
+        if ! node "$GITHUB_ACTION_PATH/src/util/shellwords.js" "$INPUT_ARGS" > "$RUNNER_TEMP/envdiff-args"; then
+          echo "::error::Could not read the args input: $INPUT_ARGS"
+          exit 2
+        fi
+        extra=()
+        while IFS= read -r -d '' arg; do extra+=( "$arg" ); done < "$RUNNER_TEMP/envdiff-args"
         set +e
         node "$GITHUB_ACTION_PATH/bin/envdiff.js" "${args[@]}" "${extra[@]}"
         code=$?
