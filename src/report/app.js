@@ -425,7 +425,7 @@
   // ---------------------------------------------------------------- journeys
   function renderJourneys() {
     if (!DATA.journeys.length) {
-      app.innerHTML = tabs("journeys") + '<div class="card"><div class="empty"><b>No journeys configured</b>Journeys are scripted multi-step flows (log in, add to cart, check out) that run on both environments. Add them under <code>journeys:</code> in the config.</div></div>';
+      app.innerHTML = tabs("journeys") + '<div class="card"><div class="empty"><b>No journeys configured</b>Journeys are multi-step flows (open a report, filter it, check the totals) that run on both environments, written in plain English. Pass them with <code>--journey</code> or <code>--journey-file</code>, or add them under <code>journeys:</code> in the config.</div></div>';
       return;
     }
     app.innerHTML = tabs("journeys") + DATA.journeys.map(function (j) {
@@ -433,8 +433,11 @@
         '<table><thead><tr><th>#</th><th>Step</th><th>Baseline</th><th>Candidate</th><th style="width:90px">Result</th><th>Screens</th></tr></thead><tbody>' +
         j.steps.map(function (s, i) {
           var ev = s.screenshots || {};
-          var side = function (o) { return o.ok ? '<span class="status-ok">ok</span> <span class="muted mono small">' + esc(o.key || "") + "</span>" : o.error ? '<span class="status-bad">' + esc(o.error) + "</span>" : '<span class="muted">–</span>'; };
-          return "<tr><td>" + (i + 1) + '</td><td class="el">' + esc(s.label) + "</td><td>" + side(s.baseline) + "</td><td>" + side(s.candidate) + '</td><td><span class="verdict-pill ' + s.verdict + '">' + s.verdict + "</span></td><td>" +
+          var side = function (o) {
+            var seen = o.observed ? '<div class="small">' + esc(o.observed) + "</div>" : "";
+            return (o.ok ? '<span class="status-ok">ok</span> <span class="muted mono small">' + esc(o.key || "") + "</span>" : o.error ? '<span class="status-bad">' + esc(o.error) + "</span>" : '<span class="muted">–</span>') + seen;
+          };
+          return "<tr><td>" + (i + 1) + '</td><td class="el">' + esc(s.label) + (s.note ? '<div class="muted small">' + esc(s.note) + "</div>" : "") + "</td><td>" + side(s.baseline) + "</td><td>" + side(s.candidate) + '</td><td><span class="verdict-pill ' + s.verdict + '">' + s.verdict + "</span></td><td>" +
             (ev.baseline || ev.candidate ? '<button class="icon-btn" data-open=\'' + esc(JSON.stringify({ b: ev.baseline, c: ev.candidate, d: ev.diff, t: j.name + " — " + s.label, m: "side" })) + "'>View</button>" : "") + "</td></tr>";
         }).join("") + "</tbody></table></div>";
     }).join("");

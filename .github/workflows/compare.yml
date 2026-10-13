@@ -1,26 +1,55 @@
 # Run a comparison from the Actions tab: "Compare environments" → Run workflow.
 #
-# For environments behind auth, add repository secrets (Settings → Secrets and
-# variables → Actions); they are picked up automatically when present:
-#   ENVDIFF_HEADERS            "Name: value" lines sent to both environments
-#   ENVDIFF_BASELINE_HEADERS   ...baseline only
-#   ENVDIFF_CANDIDATE_HEADERS  ...candidate only
-#   ENVDIFF_BASELINE_AUTH      HTTP basic auth "user:password"
-#   ENVDIFF_CANDIDATE_AUTH
-#   ANTHROPIC_API_KEY          for the optional AI triage
+# Set up once, in Settings → Secrets and variables → Actions:
+#
+#   Variables (addresses aren't secret)
+#     ENVDIFF_PROD_URL, ENVDIFF_UAT_URL, ENVDIFF_DEV_URL
+#
+#   Secrets (logins; names are case-insensitive)
+#     ENVDIFF_<ENV>_USERNAME, ENVDIFF_<ENV>_PASSWORD          the default user, e.g. ENVDIFF_UAT_USERNAME
+#     ENVDIFF_<ENV>_<USER>_USERNAME, ENVDIFF_<ENV>_<USER>_PASSWORD   more users, e.g. ENVDIFF_UAT_ADMIN_PASSWORD
+#     ENVDIFF_<ENV>[_<USER>]_TOTP      authenticator secret, if the login asks for a one-time code
+#     ENVDIFF_HEADERS / ENVDIFF_BASELINE_HEADERS / ENVDIFF_CANDIDATE_HEADERS   "Name: value" lines
+#     ANTHROPIC_API_KEY                for AI with Claude (not needed for Copilot)
+#
+# "users" runs one comparison per user, in parallel: "default, admin" logs in
+# as ENVDIFF_<ENV>_USERNAME in one run and ENVDIFF_<ENV>_ADMIN_USERNAME in
+# another. Each run uploads its own report.
+#
+# AI with "copilot" uses GitHub Copilot as this workflow's GitHub user, with
+# no other secret: the job grants `copilot-requests: write`. For an
+# organization's repository, an owner must allow "Copilot CLI billed to the
+# organization" in the Copilot policies.
 name: Compare environments
 
 on:
   workflow_dispatch:
     inputs:
       baseline:
-        description: Baseline URL (known-good, e.g. production or UAT)
-        required: true
+        description: Baseline — the known-good environment
+        type: choice
+        options: [prod, uat, dev]
+        default: prod
       candidate:
-        description: Candidate URL (the new code, e.g. dev or a preview)
-        required: true
+        description: Candidate — the environment with the new code
+        type: choice
+        options: [uat, dev, prod]
+        default: uat
+      users:
+        description: 'Log in as (comma-separated): "default", or a user name with ENVDIFF_<ENV>_<USER>_* secrets, or "none"'
+        default: default
+      journey:
+        description: 'Journey in plain English, steps separated by ";" — e.g. Go to Orders; Type "west" into Search orders; Sort by Amount; Expect to see "West"'
+        default: ""
+      journey_file:
+        description: Journey file in this repository (plain-English text, Markdown or YAML)
+        default: ""
+      crawl:
+        description: Crawl and compare pages (off = run only the journeys)
+        type: boolean
+        default: true
       paths:
-        description: Start pages, comma-separated (blank = the URL's own path)
+        description: Start pages, comma-separated (blank = the environment's own start page)
         default: ""
       max_pages:
         description: Pages to compare
@@ -39,19 +68,63 @@ on:
         options: [critical, major, minor, never]
         default: critical
       ai:
-        description: Triage findings with Claude (needs the ANTHROPIC_API_KEY secret)
-        type: boolean
-        default: false
+        description: AI triage of the findings, and help with journey steps it can't read on its own
+        type: choice
+        options: ["off", copilot, anthropic]
+        default: "off"
 
 permissions:
   contents: read
 
 jobs:
-  compare:
+  users:
+    name: Users to log in as
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    # Empty when a secret isn't set, which envdiff treats as "not configured".
+    outputs:
+      matrix: ${{ steps.users.outputs.matrix }}
+    steps:
+      - id: users
+        env:
+          USERS: ${{ inputs.users }}
+        run: |
+          # "default, qa-admin" -> [{"name":"default","prefix":""},{"name":"qa-admin","prefix":"QA_ADMIN_"}]
+          # The prefix picks the secrets: ENVDIFF_<ENV>_<PREFIX>USERNAME.
+          out=""
+          IFS=',' read -ra list <<< "$USERS"
+          for raw in "${list[@]}"; do
+            name="$(printf '%s' "$raw" | tr -cd 'A-Za-z0-9 _.-' | xargs)"
+            [ -z "$name" ] && continue
+            key="$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]' | sed -E 's/[^A-Z0-9]+/_/g; s/^_+|_+$//g')"
+            case "$key" in DEFAULT|NONE) prefix="" ;; *) prefix="${key}_" ;; esac
+            out="${out:+$out,}{\"name\":\"$name\",\"prefix\":\"$prefix\"}"
+          done
+          if [ -z "$out" ]; then out='{"name":"default","prefix":""}'; fi
+          echo "matrix=[$out]" >> "$GITHUB_OUTPUT"
+
+  compare:
+    name: ${{ inputs.baseline }} vs ${{ inputs.candidate }} as ${{ matrix.user.name }}
+    needs: users
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      # GitHub Copilot as the AI provider, billed to the workflow's user or organization.
+      copilot-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        user: ${{ fromJSON(needs.users.outputs.matrix) }}
+    # Empty when a variable or secret isn't set, which envdiff treats as "not configured".
     env:
+      ENVDIFF_PROD_URL: ${{ vars.ENVDIFF_PROD_URL }}
+      ENVDIFF_UAT_URL: ${{ vars.ENVDIFF_UAT_URL }}
+      ENVDIFF_DEV_URL: ${{ vars.ENVDIFF_DEV_URL }}
+      ENVDIFF_BASELINE_USERNAME: ${{ secrets[format('ENVDIFF_{0}_{1}USERNAME', inputs.baseline, matrix.user.prefix)] }}
+      ENVDIFF_BASELINE_PASSWORD: ${{ secrets[format('ENVDIFF_{0}_{1}PASSWORD', inputs.baseline, matrix.user.prefix)] }}
+      ENVDIFF_BASELINE_TOTP: ${{ secrets[format('ENVDIFF_{0}_{1}TOTP', inputs.baseline, matrix.user.prefix)] }}
+      ENVDIFF_CANDIDATE_USERNAME: ${{ secrets[format('ENVDIFF_{0}_{1}USERNAME', inputs.candidate, matrix.user.prefix)] }}
+      ENVDIFF_CANDIDATE_PASSWORD: ${{ secrets[format('ENVDIFF_{0}_{1}PASSWORD', inputs.candidate, matrix.user.prefix)] }}
+      ENVDIFF_CANDIDATE_TOTP: ${{ secrets[format('ENVDIFF_{0}_{1}TOTP', inputs.candidate, matrix.user.prefix)] }}
       ENVDIFF_HEADERS: ${{ secrets.ENVDIFF_HEADERS }}
       ENVDIFF_BASELINE_HEADERS: ${{ secrets.ENVDIFF_BASELINE_HEADERS }}
       ENVDIFF_CANDIDATE_HEADERS: ${{ secrets.ENVDIFF_CANDIDATE_HEADERS }}
@@ -63,10 +136,15 @@ jobs:
         with:
           baseline: ${{ inputs.baseline }}
           candidate: ${{ inputs.candidate }}
+          user: ${{ matrix.user.name }}
+          journey: ${{ inputs.journey }}
+          journey-file: ${{ inputs.journey_file }}
+          crawl: ${{ inputs.crawl }}
           paths: ${{ inputs.paths }}
           max-pages: ${{ inputs.max_pages }}
           viewports: ${{ inputs.viewports }}
           click-depth: ${{ inputs.click_depth }}
           fail-on: ${{ inputs.fail_on }}
-          ai: ${{ inputs.ai }}
+          ai: ${{ inputs.ai == 'off' && 'false' || inputs.ai }}
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          artifact-name: envdiff-report-${{ inputs.baseline }}-vs-${{ inputs.candidate }}-${{ matrix.user.name }}

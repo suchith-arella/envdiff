@@ -2,6 +2,16 @@
 # ${VAR} reads an environment variable (an error if unset); ${VAR:-default} doesn't fail.
 # Full reference: docs/configuration.md
 
+# Either name your environments and pick two on the command line
+# (`envdiff prod uat`), with logins in environment variables
+# (ENVDIFF_<ENV>_USERNAME / _PASSWORD, ENVDIFF_<ENV>_<USER>_… for --user <user>):
+# environments:
+#   prod: { url: https://www.example.com, label: PROD }
+#   uat:  { url: https://uat.example.com, label: UAT }
+#   dev:  { url: https://dev.example.com, label: DEV }
+# user: admin                     # log in as this user in both; "none" = don't log in
+
+# …or give the two sides directly:
 baseline:                         # the known-good side
   url: https://www.example.com
   label: PROD
@@ -14,14 +24,16 @@ candidate:                        # the side with the new code
   label: UAT
   # httpCredentials: { username: "${UAT_USER}", password: "${UAT_PASS}" }
 
-# Log in before comparing (runs once per environment; mutations allowed during login).
+# Logging in: with credentials (ENVDIFF_<ENV>_USERNAME / _PASSWORD, or
+# ENVDIFF_BASELINE_* / ENVDIFF_CANDIDATE_*), envdiff finds and fills the login
+# form itself. `auth` points it at the form or scripts it.
 # auth:
-#   loginUrl: /login
-#   steps:
-#     - fill: { label: Email, value: "${QA_USER}" }
-#     - fill: { label: Password, value: "${QA_PASSWORD}" }
+#   loginUrl: /#/login              # where the form is (default: the start page and its "Log in" link)
+#   successUrl: "**/dashboard**"    # or successSelector: "[data-testid=avatar]"
+#   steps:                          # only for forms the automatic login can't handle
+#     - fill: { label: Email, value: "{{username}}" }
+#     - fill: { label: Password, value: "{{password}}" }
 #     - click: { role: button, name: Sign in }
-#   successUrl: "**/account**"      # or successSelector: "[data-testid=avatar]"
 
 crawl:
   startPaths: ["/"]
@@ -59,15 +71,24 @@ ignore:
 stabilize:
   ignoreMutations: [".carousel", ".live-ticker"]   # don't wait for these to stop moving
 
-# Scripted flows, compared step by step.
+# Do both environments hold the same data? "different" (default) compares
+# numbers, grid cells and chart values by format, not value; "same" compares them too.
+# data: different
+
+# Flows, compared step by step. Steps in plain English, or exact actions.
 # journeys:
+#   - name: Filter orders
+#     steps:
+#       - Go to Orders
+#       - Type "west" into Search orders
+#       - Sort by Amount descending
+#       - Make sure the Orders grid has rows
+#       - Take a screenshot "West orders"
 #   - name: Checkout
 #     steps:
 #       - goto: /products/1
 #       - click: { role: button, name: Add to cart }
-#       - click: { role: link, name: Cart }
 #       - expectText: { selector: h1, text: Your cart }
-#       - screenshot: Cart
 
 report:
   outDir: envdiff-report
@@ -76,5 +97,5 @@ report:
 # severity: { "perf.*": info, "seo.title": info }    # re-grade finding types
 
 # ai:
-#   enabled: true                 # needs ANTHROPIC_API_KEY; sends screenshots to the Anthropic API
-#   model: claude-opus-5-5
+#   enabled: true                 # sends screenshots and findings to the provider
+#   provider: copilot             # copilot (GitHub Copilot as the signed-in user) or anthropic (ANTHROPIC_API_KEY)

@@ -54,6 +54,31 @@ export async function run(cfg, opts = {}) {
   const errors = [];
   let browserVersion = "";
 
+  // The AI provider (Anthropic or GitHub Copilot), started the first time
+  // something needs it: a journey step envdiff can't read, then triage.
+  /** @type {import("./ai/provider.js").AIProvider | null} */
+  let aiProvider = null;
+  /** @type {string | null} */
+  let aiError = null;
+  const ai = cfg.ai.enabled
+    ? async () => {
+        if (aiProvider || aiError) return aiProvider;
+        try {
+          const { createProvider } = await import("./ai/provider.js");
+          aiProvider = await createProvider(cfg, { log, outDir });
+        } catch (e) {
+          aiError = /** @type {Error} */ (e).message;
+          log.warn(`AI unavailable: ${aiError}`);
+        }
+        return aiProvider;
+      }
+    : null;
+  /** Once the provider refuses (signed out, no access), stop asking it. */
+  const disableAi = (/** @type {Error} */ e) => {
+    aiError ??= e.message;
+    log.warn(`AI unavailable: ${e.message}`);
+  };
+
   const targets = await resolveTargets(cfg, { log, outDir });
   /** @type {import("playwright").Browser | null} */
   let browser = null;
@@ -220,8 +245,10 @@ export async function run(cfg, opts = {}) {
     // Where the app lands after logging in is where its users start.
     const landed = authState.baseline ? scopeB.keyOf(authState.baseline.landedUrl, { ignoreQuery: cfg.crawl.ignoreQuery }) : null;
     if (defaultStart && landed && !seeds.includes(landed)) seeds.push(landed);
-    for (const k of seeds) offer(k, 0, true);
-    if (cfg.crawl.sitemap) for (const k of await sitemapKeys(primary.baseline, log)) offer(k, 1);
+    if (cfg.crawl.enabled) {
+      for (const k of seeds) offer(k, 0, true);
+      if (cfg.crawl.sitemap) for (const k of await sitemapKeys(primary.baseline, log)) offer(k, 1);
+    }
 
     /** @param {{ key: string, depth: number }} item */
     async function processPage({ key, depth }) {
@@ -436,7 +463,7 @@ export async function run(cfg, opts = {}) {
 
     if (cfg.journeys.length && !stopped()) {
       log.info(`Running ${cfg.journeys.length} journey(s)…`);
-      journeys.push(...(await runJourneys({ sessions: primary, cfg, add: findings.add, outDir, assetPath, log, stopped })));
+      journeys.push(...(await runJourneys({ sessions: primary, cfg, add: findings.add, outDir, assetPath, log, stopped, ai: ai ? async () => (aiError ? null : ai()) : null, onAiError: disableAi })));
     }
 
     api.compare(findings.add);
@@ -495,13 +522,17 @@ export async function run(cfg, opts = {}) {
     errors,
   };
 
-  if (cfg.ai.enabled) {
+  if (ai) {
     try {
+      const provider = aiError ? null : await ai();
+      if (!provider) throw new Error(aiError ?? "no AI provider");
       const { triage } = await import("./ai/triage.js");
-      await triage(report, { cfg, outDir, log });
+      await triage(report, { cfg, outDir, log, provider });
     } catch (e) {
       log.warn(`AI triage skipped: ${/** @type {Error} */ (e).message}`);
       /** @type {any} */ (report).ai = { error: /** @type {Error} */ (e).message };
+    } finally {
+      await aiProvider?.close().catch(() => {});
     }
   }
 

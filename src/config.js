@@ -87,6 +87,8 @@ export const DEFAULT_CONFIG = {
   },
 
   crawl: {
+    /** Crawl and compare pages. Off: only the journeys run. */
+    enabled: true,
     /** Pages to start from, relative to each environment's base URL. */
     startPaths: ["/"],
     maxPages: 25,
@@ -315,7 +317,14 @@ export const DEFAULT_CONFIG = {
 
   ai: {
     enabled: false,
-    model: "claude-opus-5-5",
+    /**
+     * "anthropic" (Claude, needs ANTHROPIC_API_KEY), "copilot" (GitHub
+     * Copilot as the signed-in GitHub user) or "auto": Anthropic when its key
+     * is set, otherwise Copilot.
+     */
+    provider: "auto",
+    /** null = the provider's default: claude-opus-5-5 for Anthropic, Copilot's automatic choice for Copilot. */
+    model: /** @type {string|null} */ (null),
     effort: "medium",
     /** Pages and interactions sent for triage, worst first. */
     maxItems: 25,
@@ -380,7 +389,7 @@ export const DEFAULT_CONFIG = {
 /**
  * @typedef {object} JourneyConfig
  * @property {string} name
- * @property {StepConfig[]} steps
+ * @property {(StepConfig | string)[]} steps Plain-English steps ("Type 'west' into Search") or actions ({ click: … }).
  * @property {boolean} [allowMutations]
  * @property {boolean} [screenshotEveryStep]
  */
@@ -575,6 +584,10 @@ export function resolveConfig(fileConfig = {}, overrides = {}, opts = {}) {
   if (!["different", "same"].includes(cfg.data)) {
     throw new ConfigError(`data must be "different" or "same" — got "${cfg.data}"`);
   }
+  if (!["auto", "anthropic", "copilot"].includes(String(cfg.ai.provider).toLowerCase())) {
+    throw new ConfigError(`ai.provider must be auto, anthropic or copilot — got "${cfg.ai.provider}"`);
+  }
+  cfg.ai.provider = String(cfg.ai.provider).toLowerCase();
   if (!SEVERITIES.includes(cfg.ai.minSeverity)) {
     throw new ConfigError(`ai.minSeverity must be one of ${SEVERITIES.join(", ")}`);
   }
@@ -588,6 +601,12 @@ export function resolveConfig(fileConfig = {}, overrides = {}, opts = {}) {
     if (!j || typeof j.name !== "string" || !Array.isArray(j.steps)) {
       throw new ConfigError(`Each journey needs a name and a steps list`);
     }
+    for (const step of j.steps) {
+      if (typeof step !== "string" && (!step || typeof step !== "object")) throw new ConfigError(`Journey "${j.name}" has a step that is neither text nor an action: ${JSON.stringify(step)}`);
+    }
+  }
+  if (!cfg.crawl.enabled && !cfg.journeys.length) {
+    throw new ConfigError("Crawling is off (--no-crawl) and there are no journeys: nothing to compare");
   }
   if (cfg.branches.serve && !cfg.branches.serve.start) {
     throw new ConfigError(`branches.serve needs a "start" command`);

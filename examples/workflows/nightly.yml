@@ -1,5 +1,11 @@
 # Copy to .github/workflows/ in your app's repository.
-# Every weekday morning: is UAT still behaving like production?
+# Every weekday morning: is UAT still behaving like production? Logged in, with
+# the team's journeys, and GitHub Copilot sorting regressions from noise.
+#
+# Settings → Secrets and variables → Actions:
+#   variables  ENVDIFF_PROD_URL, ENVDIFF_UAT_URL
+#   secrets    ENVDIFF_PROD_USERNAME, ENVDIFF_PROD_PASSWORD,
+#              ENVDIFF_UAT_USERNAME, ENVDIFF_UAT_PASSWORD
 name: "QA: nightly UAT vs PROD"
 
 on:
@@ -9,20 +15,27 @@ on:
 
 permissions:
   contents: read
+  copilot-requests: write # GitHub Copilot as the AI, as this workflow's user
 
 jobs:
   compare:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
-      ENVDIFF_CANDIDATE_AUTH: ${{ secrets.UAT_BASIC_AUTH }}
+      ENVDIFF_PROD_URL: ${{ vars.ENVDIFF_PROD_URL }}
+      ENVDIFF_UAT_URL: ${{ vars.ENVDIFF_UAT_URL }}
+      ENVDIFF_PROD_USERNAME: ${{ secrets.ENVDIFF_PROD_USERNAME }}
+      ENVDIFF_PROD_PASSWORD: ${{ secrets.ENVDIFF_PROD_PASSWORD }}
+      ENVDIFF_UAT_USERNAME: ${{ secrets.ENVDIFF_UAT_USERNAME }}
+      ENVDIFF_UAT_PASSWORD: ${{ secrets.ENVDIFF_UAT_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: suchith-arella/envdiff@main
         with:
-          baseline: https://www.example.com
-          candidate: https://uat.example.com
-          config: envdiff.config.yaml
+          baseline: prod
+          candidate: uat
+          journey-file: qa/journeys.md # see examples/journeys.md
+          ai: copilot
           max-pages: "60"
           viewports: desktop,mobile
           click-depth: "2"

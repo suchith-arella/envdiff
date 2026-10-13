@@ -12,6 +12,10 @@ import path from "node:path";
 import { startApp, USERS } from "./fixtures/app/server.js";
 import { compare } from "../src/index.js";
 import { autoLogin } from "../src/login.js";
+import { parseJourneyScript } from "../src/plain.js";
+import { runPlainStep } from "../src/smart.js";
+import { planStep } from "../src/ai/planner.js";
+import { deriveScopes } from "../src/urls.js";
 import { createLogger } from "../src/util/log.js";
 
 /** @type {Awaited<ReturnType<typeof startApp>>[]} */
@@ -135,6 +139,82 @@ test("the automatic login handles one-time codes and reports refusals", { timeou
     assert.match(ok.formUrl, /#\/login$/);
     await assert.rejects(login({ username: "otp@example.com", password: otp.password, totpHint: "ENVDIFF_UAT_TOTP" }), /one-time code; set ENVDIFF_UAT_TOTP/);
     await assert.rejects(login({ username: QA, password: "wrong" }), /refused: "Invalid email or password"/);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("journeys written in plain English find the broken flows", { timeout: 600_000 }, async () => {
+  const env = envFor({ prod: apps[0].url, uat: apps[1].url });
+  const journeys = parseJourneyScript(`
+Journey: Filter orders
+1. Go to Orders
+2. Type "west" into Search orders
+3. Make sure the Orders grid has rows
+
+Journey: Sales report
+- Open Reports
+- Select "Last 30 days" from Date range
+- Click Apply
+- Expect to see "Showing last 30 days"
+
+Journey: Revenue tooltip
+- Go to Dashboard
+- Hover over the Monthly revenue chart
+
+Journey: Sort customers; Go to Orders; Sort by Customer descending
+`);
+  assert.equal(journeys.length, 4);
+  const { report } = await compare(
+    { baseline: { env: "prod" }, candidate: { env: "uat" }, crawl: { enabled: false }, journeys, report: { outDir: path.join(tmp, "journeys") } },
+    { log, env },
+  );
+  const found = report.findings.map((/** @type {any} */ f) => `${f.journey} ${f.type}`).sort();
+  assert.deepEqual(found, [
+    "Filter orders journey.no-effect", // the search box filters nothing
+    "Revenue tooltip journey.tooltip", // the tooltip lost its currency format
+    "Sales report journey.step-failed", // Apply fails for 30 days, so the expected text never shows
+    "Sales report network.failed", // …because the report call returns 500
+    "Sort customers journey.no-effect", // the Customer column doesn't sort
+  ]);
+  const filter = report.journeys.find((/** @type {any} */ j) => j.name === "Filter orders");
+  assert.match(filter.steps[2].baseline.observed, /^\d+ rows$/);
+  assert.equal(report.summary.pages, 0, "--no-crawl compares no pages");
+});
+
+test("a step envdiff can't read is worked out by the AI provider, on the page as it is", { timeout: 120_000 }, async () => {
+  const { chromium } = await import("playwright");
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage();
+    await page.goto(apps[0].url);
+    await autoLogin(page, { username: QA, password: USERS[QA].password });
+    /** @type {string[]} */
+    const prompts = [];
+    // A provider that does what a model would: picks the Orders link from the list it is given.
+    const provider = /** @type {any} */ ({
+      name: "fake",
+      model: "fake",
+      usage: { input: 0, output: 0 },
+      close: async () => {},
+      ask: async (/** @type {any} */ req) => {
+        const text = req.parts[0].text;
+        prompts.push(text);
+        const line = text.split("\n").find((/** @type {string} */ l) => /^\d+\. link "Orders"/.test(l));
+        return { text: "", json: { action: "click", control: Number(line?.split(".")[0] ?? -1), value: "", explanation: "the Orders link" } };
+      },
+    });
+    const scope = deriveScopes(apps[0].url, apps[0].url, {}).baseline;
+    const r = await runPlainStep(page, null, "Have a look at what people ordered", {
+      scope,
+      timeout: 3000,
+      plan: (step, p, why) => planStep(provider, { step, page: p, why, history: [] }),
+    });
+    await page.waitForURL(/#\/orders$/);
+    assert.equal(r.chosen?.name, "Orders");
+    assert.match(r.note ?? "", /read as: click link "Orders"/);
+    assert.match(prompts[0], /Step: Have a look at what people ordered/);
+    assert.match(prompts[0], /Grids: "Top products"/);
   } finally {
     await browser.close();
   }

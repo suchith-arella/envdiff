@@ -26,6 +26,8 @@ starter. Command-line flags override the file.
 | `storageState` | — | Playwright storage state (cookies + localStorage), e.g. from `envdiff login`. |
 | `cookies` | `[]` | `[{ name, value, domain?, path? }]`; without `domain` they apply to this origin. |
 | `auth` | — | Per-environment login, overriding the top-level `auth`. |
+| `env` | — | A named environment (see below) this side is; the command line sets it for `envdiff prod uat`. |
+| `user` | — | The user to log in as on this side, overriding `user`. |
 
 Command line: positional arguments, `--baseline-label`, `--baseline-header`,
 `--baseline-auth`, `--baseline-storage` (and `candidate-…`, or unprefixed for both).
@@ -33,20 +35,60 @@ Environment: `ENVDIFF_HEADERS`, `ENVDIFF_BASELINE_HEADERS`, `ENVDIFF_CANDIDATE_H
 ("Name: value" per line, or separated by `;;`), `ENVDIFF_AUTH`,
 `ENVDIFF_BASELINE_AUTH`, `ENVDIFF_CANDIDATE_AUTH` ("user:password").
 
+## Named environments: `environments`, `user`
+
+```yaml
+environments:
+  prod: { url: https://app.example.com, label: PROD }
+  uat:
+    url: https://uat.example.com
+    users:
+      admin: { username: "${UAT_ADMIN}", password: "${UAT_ADMIN_PW}" }
+user: admin            # log in as admin in both (--user admin); "none" = don't log in
+```
+
+An environment takes any of the `baseline`/`candidate` keys, plus `users`. A name
+given on the command line (`envdiff prod uat`) or as `baseline.env` picks one. Without
+a config file, environment variables do the same:
+
+| Variable | |
+|---|---|
+| `ENVDIFF_<ENV>_URL` | The environment's address; makes `<env>` a name the command line accepts. |
+| `ENVDIFF_<ENV>_USERNAME`, `ENVDIFF_<ENV>_PASSWORD` | Its default user. |
+| `ENVDIFF_<ENV>_<USER>_USERNAME`, `…_PASSWORD` | Another user, chosen with `--user <user>` (`user`). |
+| `ENVDIFF_<ENV>[_<USER>]_TOTP` | Authenticator secret (base32, or an `otpauth://` URI) for logins that ask for a one-time code. |
+| `ENVDIFF_BASELINE_USERNAME` / `_PASSWORD` / `_TOTP` (and `CANDIDATE`) | Per side; override all of the above. |
+
+`<ENV>` and `<USER>` are upper-cased with anything but letters and digits turned into
+`_`: user `qa-admin` on `uat` is `ENVDIFF_UAT_QA_ADMIN_USERNAME`. A user that has no
+credentials is an error naming the variables to set; logging in to only one side is
+a warning. The report shows who was logged in, with the username masked.
+
 ## `auth`
 
+How to log in. With credentials and no `auth` at all, envdiff finds the login form
+itself; `auth` is for pointing it at the form, checking it worked, or scripting it.
 Runs once per environment before anything is compared, with writes allowed (a login
-form is a POST). The session is reused for every page and viewport.
+form is a POST). The session — cookies, localStorage, IndexedDB and sessionStorage —
+is reused for every page and viewport; if it ends mid-run (a page shows the login
+form where the other environment doesn't), envdiff logs in again.
 
 | Key | |
 |---|---|
-| `loginUrl` | Path or URL to open first (default: the environment's URL). |
-| `steps` | List of [steps](#steps). |
+| `loginUrl` | Path or URL to open first (default: the environment's URL). The automatic login follows a "Log in" link from there when there is no form. |
+| `steps` | A scripted login: a list of [steps](#steps), with `{{username}}`, `{{password}}` and `{{totp}}` filled in per environment. |
+| `username`, `password`, `totp` | Credentials, if not from the variables above. |
+| `usernameSelector`, `passwordSelector`, `submitSelector` | Point the automatic login at the right fields when it guesses wrong. |
 | `successUrl` | Glob the URL must match afterwards, e.g. `"**/dashboard**"`. |
 | `successSelector` | Element that must be visible afterwards. |
 
-A failed login stops the run (exit 2) and saves `login-failed-<side>.png` in the
-report directory.
+The automatic login fills username and password (on one screen or two), submits, and
+answers a one-time-code prompt from `totp`. A refused login ("Invalid email or
+password"), a CAPTCHA, a code it has no secret for, or a form still showing after 45
+seconds stops the run (exit 2) with that reason and saves `login-failed-<side>.png`
+in the report directory. Once logged in, the login page is no longer crawled and
+"Log in" controls aren't clicked. The crawl also starts where the app lands after
+logging in.
 
 ## `branches`
 
@@ -89,6 +131,7 @@ worktrees are removed at the end.
 | `sitemap` | `false` | Also seed from `/sitemap.xml` (and nested sitemaps). |
 | `ignoreQuery` | `false` | Treat `?a=1` and `?a=2` as the same page. Tracking parameters (`utm_*`, `gclid`…) are always dropped. |
 | `checkLinks` | `true` | Fetch links found beyond the page budget and report ones that break on the candidate. |
+| `enabled` | `true` | `false` (`--no-crawl`): compare no pages, only run the journeys. |
 | `maxLinkChecks` | `150` | |
 
 ## `explore`
@@ -102,7 +145,8 @@ Clicking every safe control on each page, in both environments.
 | `maxPerName` | `2` | Identical controls (40 "Add to cart" buttons) clicked at most this often per page. |
 | `depth` | `1` | `2` also clicks what clicks reveal (menu items, dialog buttons), and so on. Max 4. |
 | `includeLinks` | `false` | Also click plain links. They are crawled anyway; JavaScript links (`href="#"`, `javascript:`) are always clicked. |
-| `selects` | `true` | Exercise dropdowns by picking an option that exists on both sides. |
+| `selects` | `true` | Exercise dropdowns by picking an option that exists on both sides. A dropdown or toggle whose change shows nothing yet is followed by the nearby Apply / Search / Go button. |
+| `hover.charts` / `hover.points` | `4` / `3` | Charts per page whose points are hovered, and points per chart (first, middle, last); their tooltips are compared. `0` charts turns it off. |
 | `actionTimeout` | `4000` | ms to wait for a control to be clickable. |
 | `settleTimeout` | `2500` | ms to wait for the page to settle after an action. |
 | `viewports` | `"first"` | `"all"` explores in every viewport (slower). |
@@ -120,6 +164,7 @@ they appear on, not on every page.
 | `allowRequests` | `[]` | URL regexes let through despite being writes — POST endpoints that only read (search, pricing). |
 | `graphql` | `true` | Let GraphQL queries through while blocking mutations. |
 | `useDefaultDenyList` | `true` | Never click controls named like delete, remove account, pay, buy now, place order, unsubscribe, log out… |
+| `allowBotSensors` | `true` | Let bot-protection sensors post to their machine-generated paths (`/q_Rb83nWfxeJtPm2ka9vL0dZ/…`). They write no app data, and blocking them can get the session flagged. |
 
 ## `viewports`
 
@@ -160,6 +205,7 @@ The list of controls on a page is what a person scrolling through it would see. 
 | `scroll` | `true` | Scroll through each page so lazy and scroll-revealed content loads before the full-page screenshot. |
 | `dismissConsent` | `true` | Click "Accept" on common cookie banners (OneTrust, Cookiebot, Didomi, Usercentrics…). |
 | `confirm` | `true` | Before reporting a difference on a page or an interaction, repeat it in both environments and keep only what happens both times. Differences that don't reproduce are listed in the report as "didn't reproduce" and aren't counted. Set to `false` for faster, noisier runs. |
+| `busySelectors` | grid overlays, chart loading labels, common spinners | Loading indicators to wait out: a page isn't settled while one shows (AG Grid's "Loading…" overlay, Highcharts' loading label, Material/Bootstrap/PrimeNG/Kendo spinners, `[aria-busy=true]`…). One still showing a few seconds after everything else went quiet is given up on. |
 
 ## `visual`
 
@@ -174,6 +220,24 @@ The list of controls on a page is what a person scrolling through it would see. 
 | `fullPage` | `true` | |
 | `maxHeight` | `10000` | Full-page screenshots are cut at this height. |
 | `freezeTime` | — | ISO time `Date.now()` returns in both environments. |
+
+## `data`
+
+`different` (default) or `same`: do the two environments hold the same data?
+
+- **`different`** — UAT and production, say. Numbers in text are compared for format,
+  not value (`Revenue $1,204,330` and `Revenue $998,120` read the same); grid cells
+  for their format — amounts, percentages, dates, decimals, thousands separators,
+  `NaN` — not their values; charts for series, legend and axes, not points; and
+  grids and charts are left out of pixel comparisons (hatched in the diff image). A
+  grid or chart with no data on the candidate is minor, since it may be the data.
+- **`same`** (`--same-data`) — two builds against one backend: cell values, row
+  counts, chart points and categories, and every number are compared too.
+
+Grids are read from AG Grid (any version) and from grids that follow the ARIA grid
+pattern; charts from Highcharts' DOM, and from `window.Highcharts` when the page
+exposes it. Neither is compared as text or as controls: their own checks cover them
+(finding types `grid.*` and `chart.*`).
 
 ## `text`, `layout`
 
@@ -222,7 +286,41 @@ journeys:
     steps: [...]
 ```
 
-Journeys start at the first start path unless their first step is a `goto`.
+Steps are plain English (a string) or an exact action (an object, below), mixed
+freely. Journeys start at the first start path unless their first step opens an
+address. `--journey "<text>"` and `--journey-file <file>` add journeys from the command
+line: one step per line or separated by `;`, `Journey: <name>` (or a Markdown
+heading) starting each journey, numbering and bullets ignored. A YAML/JSON file holds
+a list of `{ name, steps }`.
+
+### Plain-English steps
+
+| Step | Examples |
+|---|---|
+| Go to | `Go to Orders` (clicks the link or menu item), `Open Settings > Users`, `Go to /#/orders` |
+| Click | `Click Apply`, `Click the Export CSV button`, `Open the user menu`, `Double-click Revenue` |
+| Type | `Type "west" into Search orders`, `Fill Email with {{username}}`, `Search for Acme` (then Enter), `Clear the search box` |
+| Choose | `Select "Last 30 days" from Date range` (native or custom dropdowns), `Set Date range to This year` |
+| Toggle | `Check Remember me`, `Uncheck "Show archived"` |
+| Keys | `Press Enter`, `Press Escape` |
+| Hover | `Hover over Customer`, `Hover over the Monthly revenue chart`, `Hover over the last point of the Sales chart` |
+| Grids | `Sort by Amount descending`, `Next page`, `Click the first row of the Orders grid` |
+| Wait | `Wait 2 seconds`, `Wait for Sales by region to appear`, `Wait until Loading disappears` |
+| Expect | `Expect to see "Saved"`, `I should not see Something went wrong`, `Verify the URL contains /orders`, `Make sure the Orders grid has rows` (or `no` / `3` / `at least 3` rows), `Check that the Revenue chart shows Target`, `Expect no errors`, `The Apply button should be visible` |
+| Other | `Take a screenshot "Orders"`, `Scroll to the bottom`, `Refresh the page`, `Go back`, `Log in` (already done) |
+
+Controls are found by what they're called on screen: accessible name, label,
+placeholder, text, column header or legend name; a kind word (button, link, tab,
+column) narrows it. The baseline resolves each step; the candidate then acts on the
+control with the same role and name. `{{username}}`, `{{password}}` and `{{totp}}`
+are the logged-in user's; `{{env.NAME}}` reads an environment variable. Passwords,
+codes and `{{env.…}}` values are shown as `••••` in the report. With `--ai`, a step
+that doesn't read as any of these, or whose target isn't found, is worked out by the
+AI provider against the page's controls.
+
+Besides failures (`journey.step-failed`), a step that changes the page on the
+baseline and does nothing on the candidate is reported (`journey.no-effect`), and so
+are tooltips that differ while hovering (`journey.tooltip`, `journey.tooltip-missing`).
 
 ### Steps
 
@@ -262,8 +360,9 @@ Any step can also take `label:` (shown in the report) and `timeout:` (ms).
 
 | Key | Default | |
 |---|---|---|
-| `enabled` | `false` | `--ai`. Needs `ANTHROPIC_API_KEY`. Sends screenshots and findings to the Anthropic API. |
-| `model` | `claude-opus-5-5` | |
+| `enabled` | `false` | `--ai`. Triage of findings, and help with journey steps. Sends screenshots and findings to the provider. |
+| `provider` | `auto` | `anthropic` (Claude; `ANTHROPIC_API_KEY`), `copilot` (GitHub Copilot as the signed-in GitHub user: `COPILOT_GITHUB_TOKEN`, `GH_TOKEN` or `GITHUB_TOKEN` — in Actions the job needs `permissions: copilot-requests: write` — or a `copilot login` session; needs `npm install @github/copilot-sdk`), or `auto`: Anthropic when its key is set, otherwise Copilot. `--ai-provider`. |
+| `model` | provider's | `claude-opus-5-5` for Anthropic; Copilot's automatic choice (`auto`) for Copilot, or any model your Copilot plan offers. |
 | `effort` | `medium` | `low`, `medium`, `high`, `xhigh`, `max`. |
 | `maxItems` | `25` | Pages/journeys triaged, worst first. |
 | `minSeverity` | `minor` | Findings below this aren't sent. |
@@ -290,6 +389,7 @@ Any step can also take `label:` (shown in the report) and `timeout:` (ms).
 | content | `content.text`, `content.suspicious`, `elements.label` |
 | links | `links.broken`, `links.broken-new`, `elements.href` |
 | visual / layout | `visual.diff`, `layout.shift`, `layout.moved`, `layout.style`, `layout.overflow` |
-| journey | `journey.step-failed`, `journey.diverged`, `journey.baseline-failed`, `journey.visual` |
+| journey | `journey.step-failed`, `journey.diverged`, `journey.baseline-failed`, `journey.no-effect`, `journey.tooltip`, `journey.tooltip-missing`, `journey.visual` |
+| data | `grid.missing`, `grid.added`, `grid.loading`, `grid.empty`, `grid.row-count`, `grid.column-missing`, `grid.column-added`, `grid.column-renamed`, `grid.column-order`, `grid.column-empty`, `grid.cell-errors`, `grid.format`, `grid.sort`, `grid.paging`, `grid.values`, `chart.missing`, `chart.added`, `chart.no-data`, `chart.title`, `chart.series-missing`, `chart.series-added`, `chart.series-type`, `chart.series-hidden`, `chart.series-empty`, `chart.points`, `chart.axis`, `chart.categories`, `chart.menu`, `chart.tooltip`, `chart.tooltip-missing`, `chart.tooltip-new` |
 | a11y | `a11y.<axe rule id>` |
 | perf, seo, security | `perf.slower`, `seo.title`, `seo.noindex`, `seo.canonical`, `seo.lang`, `security.header` |

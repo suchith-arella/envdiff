@@ -1,10 +1,11 @@
 /**
- * Optional AI triage with Claude: label each finding as a likely regression,
- * an intended change, an environment/data difference, or noise — using the
- * screenshots as evidence — and write a short summary for the QA lead.
+ * Optional AI triage: label each finding as a likely regression, an intended
+ * change, an environment/data difference, or noise — using the screenshots as
+ * evidence — and write a short summary for the QA lead.
  *
  * Advisory only: labels never change severities or the pass/fail verdict.
- * Sends screenshots and finding text to the Anthropic API; off by default.
+ * Sends screenshots and finding text to the configured provider (Claude via
+ * the Anthropic API, or GitHub Copilot); off by default.
  */
 import path from "node:path";
 import fs from "node:fs";
@@ -12,6 +13,7 @@ import { PNG } from "pngjs";
 import { cropPng } from "../compare/visual.js";
 import { atLeast, severityRank } from "../config.js";
 import { mapLimit, truncate } from "../util/misc.js";
+import { createProvider, AIUnavailableError } from "./provider.js";
 
 const VERDICTS = ["regression", "intended_change", "environment_difference", "noise"];
 
@@ -52,116 +54,103 @@ const SCHEMA = {
 
 /**
  * @param {any} report The report object, mutated in place: findings gain `ai`, report gains `ai`.
- * @param {{ cfg: import("../config.js").Config, outDir: string, log: import("../util/log.js").Logger, client?: any }} ctx
- *   `client` replaces the Anthropic client (tests).
+ * @param {{ cfg: import("../config.js").Config, outDir: string, log: import("../util/log.js").Logger, provider?: import("./provider.js").AIProvider, client?: any }} ctx
+ *   `provider` replaces the configured one; `client` an Anthropic client (tests).
  */
-export async function triage(report, { cfg, outDir, log, client: injected }) {
-  const { default: Anthropic } = await import("@anthropic-ai/sdk");
-  const client = injected ?? new Anthropic({ maxRetries: 4 });
+export async function triage(report, { cfg, outDir, log, provider: given, client }) {
   const groups = buildGroups(report, cfg);
   if (!groups.length) {
     report.ai = { model: cfg.ai.model, summary: "Nothing at or above the triage threshold.", counts: {} };
     return;
   }
-  log.info(`AI triage: ${groups.length} page(s)/journey(s) → ${cfg.ai.model} (sends screenshots and findings to the Anthropic API)…`);
-
-  const usage = { input: 0, output: 0 };
-  let useFallbacks = true;
-
-  /** @param {any} params */
-  async function call(params) {
-    try {
-      const res = await client.beta.messages.create({
-        ...params,
-        model: cfg.ai.model,
-        ...(useFallbacks ? { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" } : {}),
-      });
-      usage.input += res.usage?.input_tokens ?? 0;
-      usage.output += res.usage?.output_tokens ?? 0;
-      return res;
-    } catch (e) {
-      // Accounts or proxies without server-side fallbacks: retry once without them.
-      if (useFallbacks && e instanceof Anthropic.BadRequestError && /fallback/i.test(e.message)) {
-        useFallbacks = false;
-        return call(params);
-      }
-      throw e;
-    }
-  }
+  const provider =
+    given ?? (await createProvider(client ? { ...cfg, ai: { ...cfg.ai, provider: "anthropic" } } : cfg, { log, outDir, anthropicClient: client }));
+  const where = provider.name === "copilot" ? "GitHub Copilot" : "the Anthropic API";
+  log.info(`AI triage: ${groups.length} page(s)/journey(s) → ${provider.model} (sends screenshots and findings to ${where})…`);
 
   /** @type {{ key: string, summary: string }[]} */
   const pageSummaries = [];
   let failures = 0;
-  await mapLimit(groups, 3, async (g) => {
-    try {
-      const content = [{ type: "text", text: describeGroup(g, report) }, ...evidenceFor(g, report, outDir)];
-      content.push({ type: "text", text: "Classify every finding id listed above, then summarize this page in one sentence." });
-      const res = await call({
-        max_tokens: 16000,
-        system: SYSTEM,
-        output_config: { effort: cfg.ai.effort, format: { type: "json_schema", schema: SCHEMA } },
-        messages: [{ role: "user", content }],
-      });
-      if (res.stop_reason === "refusal") {
-        log.debug(`AI triage declined ${g.label}`);
-        failures++;
-        return;
-      }
-      const text = res.content.filter((/** @type {any} */ b) => b.type === "text").map((/** @type {any} */ b) => b.text).join("");
-      const parsed = JSON.parse(text);
-      for (const r of parsed.findings ?? []) {
-        const f = report.findings.find((/** @type {any} */ x) => x.id === r.id);
-        if (!f || !VERDICTS.includes(r.verdict)) continue;
-        f.ai = { verdict: r.verdict, confidence: Math.max(0, Math.min(1, Number(r.confidence) || 0)), explanation: String(r.explanation).slice(0, 300) };
-      }
-      if (parsed.summary) pageSummaries.push({ key: g.label, summary: String(parsed.summary).slice(0, 400) });
-    } catch (e) {
-      failures++;
-      if (e instanceof Anthropic.AuthenticationError) throw new Error("Anthropic API key missing or invalid (set ANTHROPIC_API_KEY)");
-      if (e instanceof Anthropic.PermissionDeniedError) throw new Error(`Anthropic API refused access: ${e.message}`);
-      log.debug(`AI triage failed for ${g.label}: ${/** @type {Error} */ (e).message}`);
-    }
-  });
-
-  /** @type {Record<string, number>} */
-  const counts = Object.fromEntries(VERDICTS.map((v) => [v, 0]));
-  for (const f of report.findings) if (f.ai) counts[f.ai.verdict]++;
-
-  let summary = "";
+  /** @type {Error | null} */
+  let fatal = null;
   try {
-    const regressions = report.findings
-      .filter((/** @type {any} */ f) => f.ai?.verdict === "regression")
-      .slice(0, 25)
-      .map((/** @type {any} */ f) => `- [${f.severity}] ${f.page ?? f.journey ?? ""}: ${f.title}`);
-    const res = await call({
-      max_tokens: 4000,
-      system:
-        "You write the summary at the top of a QA comparison report. Plain sentences, no headings or bullet points, at most 4 sentences. Lead with whether the candidate looks safe to promote and the most important regressions, naming pages.",
-      output_config: { effort: "low" },
-      messages: [
-        {
-          role: "user",
-          content: `Baseline: ${report.meta.baseline.label} (${report.meta.baseline.url})\nCandidate: ${report.meta.candidate.label} (${report.meta.candidate.url})\nDeterministic verdict: ${report.summary.verdict} (${JSON.stringify(report.summary.counts)})\nAI labels: ${JSON.stringify(counts)}\n\nLikely regressions:\n${regressions.join("\n") || "(none)"}\n\nPer-page notes:\n${pageSummaries.map((p) => `- ${p.key}: ${p.summary}`).join("\n")}`,
-        },
-      ],
+    await mapLimit(groups, 3, async (g) => {
+      if (fatal) return;
+      try {
+        const res = await provider.ask({
+          system: SYSTEM,
+          parts: [
+            { type: "text", text: describeGroup(g, report) },
+            ...evidenceFor(g, report, outDir),
+            { type: "text", text: "Classify every finding id listed above, then summarize this page in one sentence." },
+          ],
+          schema: SCHEMA,
+          effort: cfg.ai.effort,
+          maxTokens: 16000,
+        });
+        if (res.refused) {
+          log.debug(`AI triage declined ${g.label}`);
+          failures++;
+          return;
+        }
+        const parsed = res.json ?? {};
+        for (const r of parsed.findings ?? []) {
+          const f = report.findings.find((/** @type {any} */ x) => x.id === r.id);
+          if (!f || !VERDICTS.includes(r.verdict)) continue;
+          f.ai = { verdict: r.verdict, confidence: Math.max(0, Math.min(1, Number(r.confidence) || 0)), explanation: String(r.explanation).slice(0, 300) };
+        }
+        if (parsed.summary) pageSummaries.push({ key: g.label, summary: String(parsed.summary).slice(0, 400) });
+      } catch (e) {
+        failures++;
+        if (e instanceof AIUnavailableError) fatal = e;
+        else log.debug(`AI triage failed for ${g.label}: ${/** @type {Error} */ (e).message}`);
+      }
     });
-    if (res.stop_reason !== "refusal") summary = res.content.filter((/** @type {any} */ b) => b.type === "text").map((/** @type {any} */ b) => b.text).join("").trim();
-  } catch (e) {
-    log.debug(`AI summary failed: ${/** @type {Error} */ (e).message}`);
-  }
+    if (fatal) throw fatal;
 
-  report.ai = {
-    model: cfg.ai.model,
-    summary: summary || (pageSummaries.length ? pageSummaries.map((p) => `${p.key}: ${p.summary}`).join(" ") : ""),
-    counts,
-    pages: pageSummaries,
-    usage,
-    failures,
-  };
-  log.info(
-    `AI triage: ${counts.regression} likely regression(s), ${counts.intended_change} intended, ${counts.environment_difference} environment, ${counts.noise} noise` +
-      (failures ? ` (${failures} group(s) not triaged)` : ""),
-  );
+    /** @type {Record<string, number>} */
+    const counts = Object.fromEntries(VERDICTS.map((v) => [v, 0]));
+    for (const f of report.findings) if (f.ai) counts[f.ai.verdict]++;
+
+    let summary = "";
+    try {
+      const regressions = report.findings
+        .filter((/** @type {any} */ f) => f.ai?.verdict === "regression")
+        .slice(0, 25)
+        .map((/** @type {any} */ f) => `- [${f.severity}] ${f.page ?? f.journey ?? ""}: ${f.title}`);
+      const res = await provider.ask({
+        system:
+          "You write the summary at the top of a QA comparison report. Plain sentences, no headings or bullet points, at most 4 sentences. Lead with whether the candidate looks safe to promote and the most important regressions, naming pages.",
+        parts: [
+          {
+            type: "text",
+            text: `Baseline: ${report.meta.baseline.label} (${report.meta.baseline.url})\nCandidate: ${report.meta.candidate.label} (${report.meta.candidate.url})\nDeterministic verdict: ${report.summary.verdict} (${JSON.stringify(report.summary.counts)})\nAI labels: ${JSON.stringify(counts)}\n\nLikely regressions:\n${regressions.join("\n") || "(none)"}\n\nPer-page notes:\n${pageSummaries.map((p) => `- ${p.key}: ${p.summary}`).join("\n")}`,
+          },
+        ],
+        effort: "low",
+        maxTokens: 4000,
+      });
+      if (!res.refused) summary = res.text.trim();
+    } catch (e) {
+      log.debug(`AI summary failed: ${/** @type {Error} */ (e).message}`);
+    }
+
+    report.ai = {
+      provider: provider.name,
+      model: provider.model,
+      summary: summary || (pageSummaries.length ? pageSummaries.map((p) => `${p.key}: ${p.summary}`).join(" ") : ""),
+      counts,
+      pages: pageSummaries,
+      usage: provider.usage,
+      failures,
+    };
+    log.info(
+      `AI triage: ${counts.regression} likely regression(s), ${counts.intended_change} intended, ${counts.environment_difference} environment, ${counts.noise} noise` +
+        (failures ? ` (${failures} group(s) not triaged)` : ""),
+    );
+  } finally {
+    if (!given) await provider.close();
+  }
 }
 
 /**
@@ -213,7 +202,7 @@ function describeGroup(g, report) {
  * @param {string} outDir
  */
 function evidenceFor(g, report, outDir) {
-  /** @type {any[]} */
+  /** @type {import("./provider.js").AIPart[]} */
   const blocks = [];
   /** @param {string} label @param {string} rel @param {{x:number,y:number,w:number,h:number}} [rect] */
   const image = (label, rel, rect) => {
@@ -224,7 +213,7 @@ function evidenceFor(g, report, outDir) {
       const r = rect ?? { x: 0, y: 0, w: size.width, h: Math.min(size.height, 1400) };
       const data = cropPng(file, r, 1200).toString("base64");
       blocks.push({ type: "text", text: label });
-      blocks.push({ type: "image", source: { type: "base64", media_type: "image/png", data } });
+      blocks.push({ type: "image", mediaType: "image/png", data });
     } catch {
       // unreadable image; skip it
     }

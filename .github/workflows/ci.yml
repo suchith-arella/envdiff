@@ -15,7 +15,7 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -74,3 +74,60 @@ jobs:
           test "$CRITICAL" -gt 0
           test "$EXIT_CODE" = 1
           test "$OUTCOME" = failure
+
+  # The action against the fixture analytics app: named environments, logins
+  # from environment variables, journeys in plain English, no crawl.
+  action-journeys:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ENVDIFF_PROD_URL: http://127.0.0.1:4201/
+      ENVDIFF_UAT_URL: http://127.0.0.1:4202/
+      # The fixture's own test user; not a real credential.
+      ENVDIFF_PROD_USERNAME: qa@example.com
+      ENVDIFF_PROD_PASSWORD: Qa-pass-1
+      ENVDIFF_UAT_USERNAME: qa@example.com
+      ENVDIFF_UAT_PASSWORD: Qa-pass-1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci # the fixture app serves AG Grid from devDependencies
+      - name: Start the fixture app (baseline and candidate)
+        run: |
+          nohup node test/fixtures/app/server.js --variant baseline --port 4201 > baseline.log 2>&1 &
+          nohup node test/fixtures/app/server.js --variant candidate --port 4202 > candidate.log 2>&1 &
+          for port in 4201 4202; do
+            for i in $(seq 1 30); do curl -sf "http://127.0.0.1:$port/" > /dev/null && break; sleep 1; done
+          done
+      - name: Compare
+        id: envdiff
+        uses: ./
+        continue-on-error: true
+        with:
+          baseline: prod
+          candidate: uat
+          crawl: "false"
+          journey: |
+            Journey: Filter orders
+            Go to Orders
+            Type "west" into Search orders
+            Journey: Sales report
+            Open Reports
+            Select "Last 30 days" from Date range
+            Click Apply
+            Expect to see "Showing last 30 days"
+          artifact-name: action-journeys-report
+      - name: Check the outputs
+        env:
+          VERDICT: ${{ steps.envdiff.outputs.verdict }}
+          CRITICAL: ${{ steps.envdiff.outputs.critical }}
+          MAJOR: ${{ steps.envdiff.outputs.major }}
+          EXIT_CODE: ${{ steps.envdiff.outputs.exit-code }}
+        run: |
+          echo "verdict=$VERDICT critical=$CRITICAL major=$MAJOR exit=$EXIT_CODE"
+          test "$VERDICT" = fail
+          test "$CRITICAL" -gt 0   # the 30-day report fails on the candidate
+          test "$MAJOR" -gt 0      # the search box filters nothing on the candidate
+          test "$EXIT_CODE" = 1

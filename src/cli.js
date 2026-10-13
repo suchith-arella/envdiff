@@ -6,6 +6,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadConfigFile, resolveConfig, ConfigError } from "./config.js";
 import { classifyTarget } from "./targets.js";
 import { knownEnvironments } from "./environments.js";
+import { parseJourneyScript } from "./plain.js";
+import YAML from "yaml";
 import { run, VERSION } from "./run.js";
 import { renderMarkdown } from "./report/index.js";
 import { createLogger, color, formatDuration } from "./util/log.js";
@@ -57,6 +59,14 @@ ${color.bold("Access")}
       ENVDIFF_HEADERS, ENVDIFF_BASELINE_HEADERS, ENVDIFF_CANDIDATE_HEADERS  ("Name: value" per line)
       ENVDIFF_AUTH, ENVDIFF_BASELINE_AUTH, ENVDIFF_CANDIDATE_AUTH          ("user:pass")
 
+${color.bold("Journeys")}
+      --journey <text>         A journey in plain English, one step per line or separated by ";"
+                               (repeatable), e.g. "Go to Orders; Type 'west' into Search; Sort by Amount".
+                               "Journey: <name>" starts another journey in the same text.
+      --journey-file <file>    Journeys from a file: plain-English text or Markdown, or YAML/JSON
+                               (repeatable)
+      --no-crawl               Only run the journeys: don't crawl and compare pages
+
 ${color.bold("Scope and noise")}
       --include <regex> / --exclude <regex>   Only / never crawl matching paths (repeatable)
       --mask <selector>        Paint over before screenshots, e.g. .clock (repeatable)
@@ -78,9 +88,13 @@ ${color.bold("Runtime")}
       --proxy <url>            Send the browser's traffic through a proxy, e.g. http://proxy.corp:3128
       --headed                 Show the browser
       --timeout <minutes>      Stop after this long and report what was done (default 45)
-      --ai                     Claude triage of differences (needs ANTHROPIC_API_KEY;
-                               sends screenshots and findings to the Anthropic API)
-      --ai-model <id>          Default claude-opus-5-5
+      --ai                     AI triage of differences, and help with journey steps written in
+                               plain English. Sends screenshots and findings to the provider.
+      --ai-provider <name>     anthropic (Claude; ANTHROPIC_API_KEY) or copilot (GitHub Copilot as
+                               the signed-in user: GITHUB_TOKEN in Actions, \`copilot login\` locally;
+                               npm install @github/copilot-sdk). Default: anthropic when its key is
+                               set, otherwise copilot. Implies --ai.
+      --ai-model <id>          Default claude-opus-5-5 (Anthropic) or Copilot's automatic choice
       --json                   Print the summary as JSON on stdout
   -v, --verbose / -q, --quiet
       --version, -h, --help
@@ -125,6 +139,9 @@ const OPTIONS = /** @type {const} */ ({
   "ignore-text": { type: "string", multiple: true },
   "freeze-time": { type: "string" },
   "same-data": { type: "boolean" },
+  journey: { type: "string", multiple: true },
+  "journey-file": { type: "string", multiple: true },
+  "no-crawl": { type: "boolean" },
   "no-explore": { type: "boolean" },
   "no-visual": { type: "boolean" },
   "no-text": { type: "boolean" },
@@ -138,6 +155,7 @@ const OPTIONS = /** @type {const} */ ({
   headed: { type: "boolean" },
   timeout: { type: "string" },
   ai: { type: "boolean" },
+  "ai-provider": { type: "string" },
   "ai-model": { type: "string" },
   json: { type: "boolean" },
   save: { type: "string" },
@@ -237,6 +255,7 @@ export function overridesFrom(v, positionals, env = process.env, environments = 
   if (v.mask) o.visual.mask = v.mask;
   if (v["freeze-time"]) o.visual.freezeTime = v["freeze-time"];
   if (v["same-data"]) o.data = "same";
+  if (v["no-crawl"]) o.crawl.enabled = false;
   if (v["no-visual"]) o.visual.enabled = false;
   if (v["ignore-text"]) o.ignore.text = v["ignore-text"];
   if (v["no-text"]) o.text = { enabled: false };
@@ -250,6 +269,10 @@ export function overridesFrom(v, positionals, env = process.env, environments = 
   if (v.headed) o.browser.headless = false;
   if (v.timeout !== undefined) o.timeouts.total = /** @type {number} */ (num(v.timeout, "timeout")) * 60_000;
   if (v.ai) o.ai.enabled = true;
+  if (v["ai-provider"]) {
+    o.ai.enabled = true;
+    o.ai.provider = v["ai-provider"];
+  }
   if (v["ai-model"]) o.ai.model = v["ai-model"];
   // Drop empty sections so they don't wipe config-file values.
   for (const k of Object.keys(o)) if (o[k] && typeof o[k] === "object" && !Array.isArray(o[k]) && !Object.keys(o[k]).length) delete o[k];
@@ -303,6 +326,9 @@ export async function main(argv) {
 
     const fileCfg = v.config ? await loadConfigFile(v.config) : await autoConfig(log);
     const overrides = overridesFrom(v, positionals, process.env, knownEnvironments(fileCfg.environments));
+    // Journeys from the command line join those in the config.
+    const extra = journeysFrom(v.journey ?? [], v["journey-file"] ?? []);
+    if (extra.length) fileCfg.journeys = [...(Array.isArray(fileCfg.journeys) ? fileCfg.journeys : []), ...extra];
     reconcileTargets(fileCfg, overrides);
     const cfg = resolveConfig(fileCfg, overrides, { warn: (m) => log.warn(m) });
 
@@ -329,7 +355,7 @@ export async function main(argv) {
       `${report.summary.verdict === "fail" ? color.red(color.bold("FAIL")) : color.green(color.bold("PASS"))}  ` +
         `${color.red(`${counts.critical} critical`)} · ${color.yellow(`${counts.major} major`)} · ${counts.minor} minor · ${color.dim(`${counts.info} info`)}  ` +
         color.dim(
-          `(${report.summary.pages} pages, ${report.summary.interactions} interactions, ${
+          `(${report.summary.pages} pages, ${report.summary.interactions} interactions, ${report.summary.journeys ? `${report.summary.journeys} journeys, ` : ""}${
             report.summary.flaky ? `${report.summary.flaky} didn't reproduce, ` : ""
           }${formatDuration(report.meta.durationMs)})`,
         ),
@@ -345,6 +371,39 @@ export async function main(argv) {
     if (!(err instanceof ConfigError) && log.verbose && err.stack) log.debug(err.stack);
     return 2;
   }
+}
+
+/**
+ * Journeys given on the command line: plain-English scripts, and files of
+ * them (text or Markdown), or YAML/JSON journey lists.
+ * @param {string[]} scripts
+ * @param {string[]} files
+ */
+export function journeysFrom(scripts, files) {
+  /** @type {{ name: string, steps: any[] }[]} */
+  const out = [];
+  for (const [i, text] of scripts.entries()) out.push(...parseJourneyScript(text, { name: scripts.length > 1 ? `Journey ${i + 1}` : "Journey" }));
+  for (const file of files) {
+    let raw;
+    try {
+      raw = fs.readFileSync(file, "utf8");
+    } catch (e) {
+      throw new ConfigError(`Cannot read journey file ${file}: ${/** @type {Error} */ (e).message}`);
+    }
+    const name = path.basename(file).replace(/\.[^.]+$/, "").replace(/[-_]+/g, " ");
+    if (/\.(ya?ml|json)$/i.test(file)) {
+      let parsed;
+      try {
+        parsed = /\.json$/i.test(file) ? JSON.parse(raw) : YAML.parse(raw);
+      } catch (e) {
+        throw new ConfigError(`Cannot parse ${file}: ${/** @type {Error} */ (e).message}`);
+      }
+      const list = Array.isArray(parsed) ? parsed : parsed?.journeys;
+      if (!Array.isArray(list)) throw new ConfigError(`${file} must hold a list of journeys (each with a name and steps)`);
+      out.push(...list.map((j, k) => (Array.isArray(j) ? { name: `${name} ${k + 1}`, steps: j } : j)));
+    } else out.push(...parseJourneyScript(raw, { name }));
+  }
+  return out;
 }
 
 /** Use ./envdiff.config.{yaml,yml,json,mjs,js} when present. */

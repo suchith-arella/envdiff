@@ -417,6 +417,21 @@ const stateOf = (e) => {
 };
 
 /**
+ * The page's inventory, as the explorer takes it.
+ * @param {import("playwright").Page} page
+ * @param {import("./config.js").Config} cfg
+ */
+export async function pageInventory(page, cfg) {
+  await page.evaluate(finishAnimations).catch(() => 0);
+  return page.evaluate(collectPage, {
+    maskSelectors: cfg.visual.mask,
+    ignoreSelectors: cfg.ignore.selectors,
+    skipSelectors: cfg.explore.skip.selectors,
+    allowSelectors: cfg.explore.allow.selectors,
+  });
+}
+
+/**
  * A fingerprint of what the page shows: controls with their state, open
  * dialogs, (normalized) text and container colours. Equal fingerprints mean
  * nothing changed. `exclude` leaves one control's own state out.
@@ -424,7 +439,7 @@ const stateOf = (e) => {
  * @param {import("./config.js").Config} cfg
  * @param {string} [exclude]
  */
-function signature(dom, cfg, exclude) {
+export function signature(dom, cfg, exclude) {
   const controls = dom.actionables.map((/** @type {El} */ e) => (e.key === exclude ? /** @type {string} */ (e.key) : `${e.key}:${stateOf(e)}`)).join(",");
   const text = normalizeLines(dom.text, { normalize: true, ignore: compilePatterns(cfg.ignore.text) }).join("\n");
   // Grids and charts aren't in the text; their own digests say when they change (sorted, paged, a series hidden).

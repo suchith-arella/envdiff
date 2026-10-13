@@ -7,11 +7,26 @@ branding:
 
 inputs:
   baseline:
-    description: Baseline URL or branch — the known-good side, e.g. production or UAT.
+    description: Baseline URL, environment name (prod, uat, dev — its address in ENVDIFF_<ENV>_URL) or branch — the known-good side.
     required: true
   candidate:
-    description: Candidate URL or branch — the side with the new code.
+    description: Candidate URL, environment name or branch — the side with the new code.
     required: true
+  user:
+    description: 'Log in as this user: ENVDIFF_<ENV>_<USER>_USERNAME / _PASSWORD (or ENVDIFF_BASELINE_* / ENVDIFF_CANDIDATE_*) in the environment. Empty: the default user, if any; "none": no login.'
+    default: ""
+  journey:
+    description: 'Journeys in plain English, one step per line or separated by ";". "Journey: <name>" starts another. E.g. Go to Orders; Type "west" into Search orders; Sort by Amount; Expect to see "West".'
+    default: ""
+  journey-file:
+    description: Journey files in the workspace (plain-English text or Markdown, or YAML/JSON), one per line.
+    default: ""
+  crawl:
+    description: '"false" to only run the journeys, without crawling and comparing pages.'
+    default: "true"
+  same-data:
+    description: '"true" when both environments hold the same data: compare numbers, grid cells and chart values too, not only their format.'
+    default: "false"
   config:
     description: Path to an envdiff config file (YAML, JSON or JS), relative to the workspace.
     default: ""
@@ -40,11 +55,17 @@ inputs:
     description: For branch inputs, the preview URL pattern, e.g. "https://{branch}--mysite.netlify.app".
     default: ""
   ai:
-    description: '"true" to have Claude triage the findings (sends screenshots and findings to the Anthropic API).'
+    description: 'AI triage of the findings and help with journey steps: "copilot" (GitHub Copilot as the workflow''s user; needs `permissions: copilot-requests: write`), "anthropic" (Claude; needs anthropic-api-key), "true" (Anthropic when its key is given, otherwise Copilot) or "false". Sends screenshots and findings to the provider.'
     default: "false"
-  anthropic-api-key:
-    description: Anthropic API key, required when ai is "true". Pass a secret.
+  ai-model:
+    description: Model to use. Default claude-opus-5-5 for Anthropic, Copilot's automatic choice for Copilot.
     default: ""
+  anthropic-api-key:
+    description: Anthropic API key, for ai "anthropic". Pass a secret.
+    default: ""
+  github-token:
+    description: 'Token for GitHub Copilot when ai is "copilot". The workflow''s own token works when the job has `permissions: copilot-requests: write`.'
+    default: ${{ github.token }}
   args:
     description: 'Extra command-line arguments for envdiff (see envdiff --help). Quote values that contain spaces, e.g. --ignore-text "Visitors online".'
     default: ""
@@ -99,6 +120,13 @@ runs:
         npm ci --omit=dev --no-audit --no-fund --loglevel=error
         echo "playwright=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
 
+    - name: Install GitHub Copilot SDK
+      # Only for Copilot as the AI provider: about 150 MB, so not part of envdiff itself.
+      if: inputs.ai == 'copilot' || ((inputs.ai == 'true' || inputs.ai == 'auto') && inputs.anthropic-api-key == '')
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: npm install --no-save --omit=dev --no-audit --no-fund --loglevel=error @github/copilot-sdk@1.0.20
+
     - name: Cache browser
       id: browser-cache
       uses: actions/cache@v4
@@ -134,8 +162,15 @@ runs:
         INPUT_FAIL_ON: ${{ inputs.fail-on }}
         INPUT_URL_TEMPLATE: ${{ inputs.url-template }}
         INPUT_AI: ${{ inputs.ai }}
+        INPUT_AI_MODEL: ${{ inputs.ai-model }}
+        INPUT_USER: ${{ inputs.user }}
+        INPUT_JOURNEY: ${{ inputs.journey }}
+        INPUT_JOURNEY_FILE: ${{ inputs.journey-file }}
+        INPUT_CRAWL: ${{ inputs.crawl }}
+        INPUT_SAME_DATA: ${{ inputs.same-data }}
         INPUT_ARGS: ${{ inputs.args }}
         INPUT_REPORT_DIR: ${{ inputs.report-dir }}
+        INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
       run: |
         # Inputs arrive as environment variables, never interpolated into this
@@ -149,7 +184,24 @@ runs:
         [ -n "$INPUT_CLICK_DEPTH" ] && args+=( --click-depth "$INPUT_CLICK_DEPTH" )
         [ -n "$INPUT_VIEWPORTS" ] && args+=( --viewports "$INPUT_VIEWPORTS" )
         [ -n "$INPUT_URL_TEMPLATE" ] && args+=( --url-template "$INPUT_URL_TEMPLATE" )
-        [ "$INPUT_AI" = "true" ] && args+=( --ai )
+        [ -n "$INPUT_USER" ] && args+=( --user "$INPUT_USER" )
+        [ -n "$INPUT_JOURNEY" ] && args+=( --journey "$INPUT_JOURNEY" )
+        while IFS= read -r file; do
+          file="${file#"${file%%[![:space:]]*}"}"; file="${file%"${file##*[![:space:]]}"}"
+          [ -n "$file" ] && args+=( --journey-file "$file" )
+        done <<< "$INPUT_JOURNEY_FILE"
+        [ "$INPUT_CRAWL" = "false" ] && args+=( --no-crawl )
+        [ "$INPUT_SAME_DATA" = "true" ] && args+=( --same-data )
+        case "$INPUT_AI" in
+          true|auto) args+=( --ai ) ;;
+          copilot|anthropic) args+=( --ai-provider "$INPUT_AI" ) ;;
+        esac
+        [ -n "$INPUT_AI_MODEL" ] && args+=( --ai-model "$INPUT_AI_MODEL" )
+        # The token only goes to envdiff when Copilot may be used.
+        case "$INPUT_AI" in
+          copilot) export COPILOT_GITHUB_TOKEN="$INPUT_GITHUB_TOKEN" ;;
+          true|auto) if [ -z "$ANTHROPIC_API_KEY" ]; then export COPILOT_GITHUB_TOKEN="$INPUT_GITHUB_TOKEN"; fi ;;
+        esac
         # Extra arguments are split the way a shell would (quotes group words),
         # by a parser that expands and runs nothing: no eval.
         if ! node "$GITHUB_ACTION_PATH/src/util/shellwords.js" "$INPUT_ARGS" > "$RUNNER_TEMP/envdiff-args"; then

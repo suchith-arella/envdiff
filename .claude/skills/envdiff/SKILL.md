@@ -14,9 +14,10 @@ expected differences, and report clearly.
 
 - **Baseline** = the known-good side (production, UAT). **Candidate** = the new code.
   If the user names them the other way round, swap them and say so.
-- Inputs are URLs or branch names. Branches need a preview URL pattern
-  (`--url-template "https://{branch}--site.netlify.app"`) or a `branches.serve`
-  config that builds them locally (see `examples/branches.config.yaml`).
+- Inputs are URLs, environment names (`prod`, `uat`, `dev` — when `ENVDIFF_<ENV>_URL`
+  or the config's `environments` names them) or branch names. Branches need a
+  preview URL pattern (`--url-template "https://{branch}--site.netlify.app"`) or a
+  `branches.serve` config that builds them locally (see `examples/branches.config.yaml`).
 - Ask before using `--allow-mutations` (lets clicks POST/PUT/PATCH/DELETE), and
   never use it against production.
 
@@ -30,10 +31,21 @@ envdiff <baseline> <candidate> --out envdiff-report --viewports desktop,mobile -
 ```
 
 - Focus a question ("is checkout broken?") with `--paths /cart,/checkout --max-pages 6 --click-depth 2`.
-- Logged-in apps: an `auth:` section in a config file (credentials from env vars),
-  `--candidate-storage auth.json`, or `--candidate-auth user:pass`. Secrets go in
-  environment variables (`ENVDIFF_CANDIDATE_AUTH`, `ENVDIFF_CANDIDATE_HEADERS`), never
-  inline in commands you show the user.
+- Logged-in apps: credentials in environment variables log in automatically —
+  `ENVDIFF_<ENV>_USERNAME` / `_PASSWORD` (`--user admin` picks
+  `ENVDIFF_<ENV>_ADMIN_USERNAME` / `_PASSWORD`; `ENVDIFF_<ENV>_TOTP` answers a
+  one-time-code prompt). For forms the automatic login can't handle, an `auth:`
+  section with steps; for SSO, `envdiff login <url> --save auth.json` then
+  `--candidate-storage auth.json`. Secrets stay in environment variables, never
+  inline in commands you show the user, and never ask the user to paste them.
+- Flows: `--journey 'Go to Orders; Type "west" into Search orders; Sort by Amount'`
+  or `--journey-file journeys.md` (plain English; `--no-crawl` runs only the
+  journeys). Write steps from what the user says the flow is; a failing step's error
+  names the closest controls it found, which helps rephrase it.
+- Different data in the two environments is the default assumption (numbers, grid
+  cells and chart values compared by format); `--same-data` when they share a backend.
+- `--ai` (`--ai-provider copilot` or `anthropic`) adds AI triage of the findings and
+  AI help for journey steps envdiff can't read.
 - Exit code 2 means it couldn't run (unreachable URL, bad config, failed login):
   read the message and fix that first.
 - A full run takes minutes; use a narrow one to iterate, a broad one to finish.
@@ -54,11 +66,14 @@ Read tool before concluding. Screenshots settle most "regression or not" questio
 ## 4. Judge each finding
 
 - **Regression**: errors after a click, dead controls, missing features, 4xx/5xx,
-  dropped API fields, `NaN`/`undefined` on screen, broken layout on mobile.
+  dropped API fields, `NaN`/`undefined` on screen, broken layout on mobile, grid
+  columns missing or losing their format (`grid.*`), chart series or tooltips gone
+  (`chart.*`), journey steps that fail or do nothing on the candidate.
 - **Intended change**: new copy, restyled or moved elements, new features — confirm
   with the user or the PR description if unsure.
-- **Environment difference**: different data (product lists, counts), feature flags,
-  slower non-production servers, missing third-party keys.
+- **Environment difference**: different data (product lists, counts, an empty grid
+  that is just an empty table), feature flags, slower non-production servers,
+  missing third-party keys.
 - **Noise**: clocks, rotating banners, ads. Fix with `--mask <selector>` or
   `ignore.text`, then re-run.
 
