@@ -115,6 +115,20 @@ export function findLoginParts(opts) {
   const USER = /user|e-?mail|login|account|identifier|\bid\b|mail/;
   const userScore = (/** @type {HTMLInputElement} */ i) =>
     (/(username|email)/.test(i.getAttribute("autocomplete") || "") ? 4 : 0) + (typeOf(i) === "email" ? 3 : 0) + (USER.test(hint(i)) ? 2 : 0);
+  // Without a password field, a field that looks like a username starts a
+  // login only in a form with nothing else to fill in: the email field of a
+  // contact, newsletter or report-request form is not one.
+  const NOT_LOGIN = /contact|newsletter|subscri|search|feedback|enquir|inquir|message|demo|quote|report/;
+  const SKIP_TYPES = ["checkbox", "radio", "hidden", "submit", "button", "image", "reset", "search"];
+  const alone = (/** @type {HTMLInputElement} */ i) => {
+    const form = i.form;
+    const named = form ? [form.id, form.getAttribute("name"), form.getAttribute("class"), form.getAttribute("action")].join(" ") : "";
+    if (NOT_LOGIN.test(hint(i)) || NOT_LOGIN.test(named.toLowerCase())) return false;
+    const fields = all("input,textarea,select", scopeOf(i)).filter(
+      (f) => visible(f) && !SKIP_TYPES.includes(typeOf(f)) && !/search|query/.test(hint(/** @type {HTMLInputElement} */ (f))),
+    );
+    return fields.length === 1;
+  };
   let user = /** @type {HTMLInputElement | null} */ (first(o.usernameSelector));
   if (!user) {
     const pool = inputs.filter(
@@ -122,8 +136,8 @@ export function findLoginParts(opts) {
     );
     pool.sort((a, b) => userScore(b) - userScore(a));
     // Next to a password field the field before it is the username whatever
-    // it is called; on its own it has to look like one.
-    user = pass ? pool[0] || null : pool.find((i) => userScore(i) >= 2) || null;
+    // it is called; on its own it has to look like one, in a form of its own.
+    user = pass ? pool[0] || null : pool.find((i) => userScore(i) >= 2 && (otp || alone(i))) || null;
   }
 
   const AWAY = /forgot|reset|cancel|close|sign ?up|register|create (an )?account|help|show|hide|reveal|toggle|back|language/i;

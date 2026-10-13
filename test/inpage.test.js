@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { chromium } from "playwright";
 import { collectPage, finishAnimations, initScript, msSinceChange } from "../src/inpage/collect.js";
 import { revealAll } from "../src/capture.js";
+import { findLoginParts } from "../src/login.js";
 
 const FADING = `<!doctype html><style>
   .card { opacity: 0; transform: translateX(40px); transition: opacity 1s 2s, transform 1s 2s; }
@@ -71,6 +72,37 @@ test("a control shown only while its section is on screen counts, wherever the p
     await revealAll(page, inst, /** @type {any} */ ({ ignore: { selectors: [] } }));
     assert.equal(await page.evaluate(() => scrollY), 0);
     assert.deepEqual(await names(), ["Request access"]);
+  } finally {
+    await browser.close();
+  }
+});
+
+const LANDING = `<!doctype html><nav><a href="#login">Login</a></nav>
+<form class="contact-form"><h2>Contact us</h2>
+  <label>First name <input name="firstName"></label><label>Last name <input name="lastName"></label>
+  <label>Email <input type="email" name="email" id="contact-form-email"></label>
+  <label>Message <textarea name="message"></textarea></label><button type="button">Submit</button></form>
+<form><label>Get our newsletter <input type="email" name="email"></label><button>Subscribe</button></form>`;
+const IDENTIFIER_FIRST = `<!doctype html><main><h1>Sign in</h1><form>
+  <label>Email <input type="email" name="identifier"></label><label><input type="checkbox"> Keep me signed in</label>
+  <input type="hidden" name="flow" value="x"><button type="submit">Next</button></form></main>`;
+
+test("a contact or newsletter form's email field is not a login: the Login link is", { timeout: 60_000 }, async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage();
+    /** @param {string} html */
+    const parts = async (html) => {
+      await page.setContent(html);
+      return page.evaluate((fn) => {
+        const p = /** @type {any} */ (new Function(`return (${fn})`)())({});
+        /** @param {Element | null} e */
+        const desc = (e) => (e ? e.getAttribute("name") || e.textContent?.trim() || e.tagName : null);
+        return { user: desc(p.user), pass: desc(p.pass), submit: desc(p.submit), loginLink: desc(p.loginLink) };
+      }, findLoginParts.toString());
+    };
+    assert.deepEqual(await parts(LANDING), { user: null, pass: null, submit: null, loginLink: "Login" });
+    assert.deepEqual(await parts(IDENTIFIER_FIRST), { user: "identifier", pass: null, submit: "Next", loginLink: null });
   } finally {
     await browser.close();
   }

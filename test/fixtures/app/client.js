@@ -121,7 +121,13 @@
     root.innerHTML =
       header(false) +
       '<div class="hero"><h1>Insights</h1><p class="muted">Sales analytics for your whole team: orders, revenue and reports in one place.</p>' +
-      '<a class="login-link" href="#/login">Login</a></div>';
+      '<a class="login-link" href="#/login">Login</a></div>' +
+      // An email field that is not a login, next to the link to the one that is.
+      '<form class="contact-form" novalidate><h2>Contact us</h2>' +
+      '<label for="contact-first-name">First name</label><input id="contact-first-name" name="firstName">' +
+      '<label for="contact-email">Email</label><input id="contact-email" name="email" type="email">' +
+      '<label for="contact-message">Message</label><textarea id="contact-message" name="message"></textarea>' +
+      '<div class="row"><button class="btn" type="button">Submit</button></div></form>';
   }
 
   function login() {

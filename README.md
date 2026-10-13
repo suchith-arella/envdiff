@@ -235,7 +235,8 @@ envdiff prod uat --user admin     # as admin: ENVDIFF_<ENV>_ADMIN_USERNAME / _PA
 | `ENVDIFF_BASELINE_*`, `ENVDIFF_CANDIDATE_*` | per side, overriding the above |
 
 The login form is found the way a person finds it: from the start page, following
-its "Log in" link if there is one; username first and password on the next screen
+its "Log in" link if there is one (an email field in a contact or newsletter form on
+a landing page is not taken for it); username first and password on the next screen
 works too, and so does a one-time code from the authenticator secret. A wrong
 password, a CAPTCHA or a form that never goes away stops the run with a clear
 message (and a screenshot) rather than comparing two login pages. Once in, envdiff:
