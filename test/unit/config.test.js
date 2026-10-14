@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mergeDeep, interpolateEnv, resolveConfig, resolveViewport, ConfigError, atLeast } from "../../src/config.js";
-import { classifyTarget, branchSlug, applyUrlTemplate } from "../../src/targets.js";
+import { classifyTarget, branchSlug, applyUrlTemplate, resolveTargets } from "../../src/targets.js";
 import { parseHeaders, overridesFrom } from "../../src/cli.js";
 
 test("mergeDeep merges objects and replaces arrays", () => {
@@ -80,4 +80,12 @@ test("CLI flags and environment become config overrides", () => {
   assert.deepEqual(o.viewports, ["desktop", "mobile"]);
   assert.equal(o.report.failOn, "major");
   assert.equal(o.ai, undefined, "empty sections are dropped so they don't override the file config");
+});
+
+test("an environment's name with no address says which variable to set", async () => {
+  const log = { info() {}, warn() {}, debug() {} };
+  /** @param {string} ref */
+  const run = (ref) => resolveTargets(/** @type {any} */ ({ baseline: { ref }, candidate: { url: "https://uat.example.com" }, branches: {} }), { log: /** @type {any} */ (log), outDir: "." });
+  await assert.rejects(run("prod"), /No address for the environment "prod": set ENVDIFF_PROD_URL=/);
+  await assert.rejects(run("feature/login"), /looks like a branch name/);
 });

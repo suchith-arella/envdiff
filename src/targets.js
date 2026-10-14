@@ -43,6 +43,9 @@ export function classifyTarget(input, environments = new Set()) {
   return { kind: "branch", ref: s };
 }
 
+/** Names teams give their environments (and rarely their branches). */
+const ENV_NAME = /^(prod|production|prd|live|uat|qa|dev|test|stage|staging|stg|sit|preprod|pre-prod|perf|demo|sandbox)$/i;
+
 /** @param {string} s */
 function withScheme(s) {
   return /^https?:\/\//i.test(s) ? s : `https://${s}`;
@@ -127,11 +130,21 @@ export async function resolveTargets(cfg, { log, outDir }) {
         targets.push({ side, url: served.url, label: label || spec.ref, ref: spec.ref, sha: served.sha });
         continue;
       }
+      const key = spec.ref.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+      // An environment's name with no address set: in GitHub Actions, most
+      // often a repository variable that was never added.
+      if (ENV_NAME.test(spec.ref)) {
+        throw new ConfigError(
+          `No address for the environment "${spec.ref}": set ENVDIFF_${key}_URL=https://…` +
+            (process.env.GITHUB_ACTIONS === "true" ? " (a repository variable: Settings → Secrets and variables → Actions → Variables)" : "") +
+            `\n  If "${spec.ref}" is a branch, pass a URL template (--url-template "https://{branch}.preview.example.com") or configure branches.serve.`,
+        );
+      }
       throw new ConfigError(
         `"${spec.ref}" looks like a branch name, but there is no way to load a branch.\n` +
           `  Either pass a URL template:  --url-template "https://{branch}.preview.example.com"\n` +
           `  or configure branches.serve to build and serve it locally (see docs/configuration.md).\n` +
-          `  If it is an environment, give its address: ENVDIFF_${spec.ref.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_URL=https://…\n` +
+          `  If it is an environment, give its address: ENVDIFF_${key}_URL=https://…\n` +
           `  If it is actually a host, prefix it: url:${spec.ref}`,
       );
     }

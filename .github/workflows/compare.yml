@@ -2,7 +2,7 @@
 #
 # Set up once, in Settings → Secrets and variables → Actions:
 #
-#   Variables (addresses aren't secret)
+#   Variables (addresses aren't secret; a secret of the same name works too)
 #     ENVDIFF_PROD_URL, ENVDIFF_UAT_URL, ENVDIFF_DEV_URL
 #
 #   Secrets (logins; names are case-insensitive)
@@ -121,9 +121,9 @@ jobs:
         user: ${{ fromJSON(needs.users.outputs.matrix) }}
     # Empty when a variable or secret isn't set, which envdiff treats as "not configured".
     env:
-      ENVDIFF_PROD_URL: ${{ vars.ENVDIFF_PROD_URL }}
-      ENVDIFF_UAT_URL: ${{ vars.ENVDIFF_UAT_URL }}
-      ENVDIFF_DEV_URL: ${{ vars.ENVDIFF_DEV_URL }}
+      ENVDIFF_PROD_URL: ${{ vars.ENVDIFF_PROD_URL || secrets.ENVDIFF_PROD_URL }}
+      ENVDIFF_UAT_URL: ${{ vars.ENVDIFF_UAT_URL || secrets.ENVDIFF_UAT_URL }}
+      ENVDIFF_DEV_URL: ${{ vars.ENVDIFF_DEV_URL || secrets.ENVDIFF_DEV_URL }}
       ENVDIFF_BASELINE_USERNAME: ${{ secrets[format('ENVDIFF_{0}_{1}USERNAME', inputs.baseline, matrix.user.prefix)] }}
       ENVDIFF_BASELINE_PASSWORD: ${{ secrets[format('ENVDIFF_{0}_{1}PASSWORD', inputs.baseline, matrix.user.prefix)] }}
       ENVDIFF_BASELINE_TOTP: ${{ secrets[format('ENVDIFF_{0}_{1}TOTP', inputs.baseline, matrix.user.prefix)] }}
@@ -136,6 +136,20 @@ jobs:
       ENVDIFF_BASELINE_AUTH: ${{ secrets.ENVDIFF_BASELINE_AUTH }}
       ENVDIFF_CANDIDATE_AUTH: ${{ secrets.ENVDIFF_CANDIDATE_AUTH }}
     steps:
+      - name: Check both environments have an address
+        env:
+          BASELINE: ${{ inputs.baseline }}
+          CANDIDATE: ${{ inputs.candidate }}
+        run: |
+          missing=0
+          for name in "$BASELINE" "$CANDIDATE"; do
+            var="ENVDIFF_$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')_URL"
+            if [ -z "${!var}" ]; then
+              echo "::error title=No address for $name::Add the repository variable $var (Settings → Secrets and variables → Actions → Variables), e.g. https://$name.example.com"
+              missing=1
+            fi
+          done
+          exit "$missing"
       - uses: actions/checkout@v4
       - uses: ./
         with:
